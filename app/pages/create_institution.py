@@ -1,1 +1,0 @@
-# Create institution page logic
