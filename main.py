@@ -1,6 +1,12 @@
 from pymongo import MongoClient
 from bson import ObjectId
-import datetime
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Union, Any
+from nicegui.events import UploadEventArguments
+from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi import Request as FastAPIRequest
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import hashlib
 import secrets
 import re
@@ -9,6 +15,17 @@ import urllib.parse
 import pandas as pd
 import io
 import base64
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import HTTPException
+from pymongo import MongoClient, ASCENDING, DESCENDING
+from bson import ObjectId
+from datetime import datetime, timedelta
+import os
+import json
+import string
+import uuid
+import logging
+from typing import Dict, List, Optional, Any
 # Import MongoClient for MongoDB connection
 from pymongo import MongoClient
 # MongoDB connection functions removed
@@ -78,7 +95,7 @@ with data_table_container:
                             row_data[f'input_{header}'] = input_field
     try:
     # ...existing code reformatted for correct indentation and block structure...
-    # Always show at least one empty row for manual data entry
+        # Always show at least one empty row for manual data entry
         if not data_rows:
             print("DEBUG: No data rows found, creating empty row for manual entry")
             ui.label('📝 Manual Data Entry').style(
@@ -108,6 +125,7 @@ with data_table_container:
                             if not data_rows:
                                 data_rows = [{}]
                             data_rows[0][f'input_{header}'] = input_field
+        global entry_method, entry_data, current_profile
         print("DEBUG: Creating action buttons")
         # Action buttons (always show)
         with ui.row().style('gap: 1rem; margin-top: 1.5rem; justify-content: center;'):
@@ -154,35 +172,6 @@ def program_admin_sidebar(program_id, institution=None):
                 ui.button('🚪 Logout', on_click=lambda: ui.navigate.to('/')).style(
                     'width: 100%; justify-content: center; background: #dc3545; color: white; border: 1px solid #dc3545; padding: 0.75rem 1rem; border-radius: 8px; transition: all 0.3s ease; font-weight: 600;'
                 ).on('mouseenter', lambda e: ui.run_javascript('event.target.style.background = "#c82333"; event.target.style.borderColor = "#c82333";')).on('mouseleave', lambda e: ui.run_javascript('event.target.style.background = "#dc3545"; event.target.style.borderColor = "#dc3545";'))
-def program_admin_sidebar(inst_id, content_func):
-    """Sidebar for Program Admin/Department Admin with only required buttons"""
-    global current_user
-    if not current_user or not current_user.get('email'):
-        ui.notify('Please log in first', color='negative')
-        ui.navigate.to('/')
-        return
-
-    from bson import ObjectId
-    inst = institutions_col.find_one({'_id': ObjectId(inst_id)})
-    main_color = inst.get('theme_color', '#667eea') if inst else '#667eea'
-    def content():
-        ui.label(f'Program Admin Dashboard').classes('fade-in').style(
-            f'font-size: 2rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
-        )
-        ui.label(f'Program: {program.get("name", "Unknown") }').style(
-            'font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 2rem;'
-        )
-        with ui.card().classes('beautiful-card').style('width: 100%; padding: 2rem; margin-bottom: 2rem; text-align: center;'):
-            ui.label('🎯 Welcome to Program Administration').style(
-                f'font-size: 1.8rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
-            )
-            ui.label('Manage your program\'s criteria and extended profiles efficiently').style(
-                'font-size: 1.1rem; color: var(--text-secondary); margin-bottom: 2rem;'
-            )
-    with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
-        program_admin_sidebar(program_id, institution)
-        with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content() 
 
 
 def add_beautiful_global_styles():
@@ -536,8 +525,22 @@ def set_theme_colors(primary_color):
 
 # Helper Functions
 def check_auth():
-    # TODO: Implement real authentication logic
-    # For now, always return True to avoid NameError
+    """Check if user is authenticated and has a valid session"""
+    global current_user
+    
+    # Check if user is in storage
+    if not hasattr(app.storage, 'user') or not app.storage.user.get('user'):
+        ui.navigate.to('/')
+        return False
+        
+    # Update current_user from storage
+    current_user = app.storage.user.get('user')
+    
+    # Additional check for required fields
+    if not current_user or not current_user.get('email') or not current_user.get('role'):
+        ui.navigate.to('/')
+        return False
+        
     return True
 def log_audit_action(action, details, user_email=None, institution_id=None, entity_type=None, entity_id=None):
     """Log an audit action"""
@@ -546,15 +549,14 @@ def log_audit_action(action, details, user_email=None, institution_id=None, enti
         user_email = current_user.get('email', 'Unknown')
     
     audit_log = {
-        'timestamp': datetime.datetime.now(datetime.timezone.utc),
-        'user_email': user_email or 'System',
+        'timestamp': datetime.now(timezone.utc),
+        'user_email': user_email or current_user.get('email'),
+        'institution_id': institution_id or current_user.get('institution_id'),
         'action': action,
         'details': details,
-        'ip_address': '127.0.0.1',
-        'institution_id': institution_id,
         'entity_type': entity_type,
         'entity_id': entity_id,
-        'created_at': datetime.datetime.now(datetime.timezone.utc)
+        'ip_address': None  # TODO: Get real IP address from request
     }
     audit_logs_col.insert_one(audit_log)
 
@@ -1008,6 +1010,7 @@ def create_user_group_page(inst_id: str, school_id: str = None, program_id: str 
 def institution_admin_sidebar(inst_id, content_func):
     """Create institution admin sidebar with themed styling"""
     global current_user
+    current_user = app.storage.user.get('user')
     if not current_user or not current_user.get('email'):
         ui.notify('Please log in first', color='negative')
         ui.navigate.to('/')
@@ -1341,7 +1344,7 @@ def institution_admin_criterias(inst_id: str):
                             deadline_val = None
                             if deadline_input.value:
                                 try:
-                                    deadline_val = datetime.datetime.strptime(deadline_input.value, '%Y-%m-%d')
+                                    deadline_val = datetime.strptime(deadline_input.value, '%Y-%m-%d')
                                 except:
                                     pass
                             
@@ -1355,8 +1358,8 @@ def institution_admin_criterias(inst_id: str):
                                 'department_id': dept_id,
                                 'headers': headers,
                                 'needs_supporting_docs': needs_docs.value,
-                                'created_at': datetime.datetime.now(datetime.timezone.utc),
-                                'updated_at': datetime.datetime.now(datetime.timezone.utc),
+                                'created_at': datetime.now(timezone.utc),
+                                'updated_at': datetime.now(timezone.utc),
                                 'created_by': current_user.get('email', 'admin') if current_user else 'admin'
                             }
                             
@@ -1636,8 +1639,8 @@ def institution_admin_details(inst_id: str):
                 with ui.column().style('flex: 1;'):
                     system_details = [
                         ('Institution ID', str(complete_inst.get('_id', 'N/A'))),
-                        ('Created Date', complete_inst.get('created_at', datetime.datetime.now()).strftime('%Y-%m-%d %H:%M:%S') if complete_inst.get('created_at') else 'N/A'),
-                        ('Last Updated', complete_inst.get('updated_at', datetime.datetime.now()).strftime('%Y-%m-%d %H:%M:%S') if complete_inst.get('updated_at') else 'N/A'),
+                        ('Created Date', complete_inst.get('created_at', datetime.now()).strftime('%Y-%m-%d %H:%M:%S') if complete_inst.get('created_at') else 'N/A'),
+                        ('Last Updated', complete_inst.get('updated_at', datetime.now()).strftime('%Y-%m-%d %H:%M:%S') if complete_inst.get('updated_at') else 'N/A'),
                         ('Status', complete_inst.get('status', 'Active')),
                         ('NAAC Accreditation', complete_inst.get('naac_grade', 'Not Available')),
                         ('NBA Accreditation', complete_inst.get('nba_accreditation', 'Not Available')),
@@ -1702,7 +1705,7 @@ def institution_admin_details(inst_id: str):
                                 else:
                                     update_data[field] = value
                             
-                            update_data['updated_at'] = datetime.datetime.now()
+                            update_data['updated_at'] = datetime.now()
                             
                             institutions_col.update_one(
                                 {'_id': ObjectId(inst_id)},
@@ -1803,7 +1806,7 @@ def institution_admin_hierarchy(inst_id: str):
                                         'abbreviation': school_abbr.value,
                                         'institution_id': inst_id,
                                         'academic_cycle_id': selected_year_id,
-                                        'created_at': datetime.datetime.now(datetime.timezone.utc),
+                                        'created_at': datetime.now(timezone.utc),
                                         'created_by': current_user.get('email', 'admin') if current_user else 'admin'
                                     }
                                     
@@ -1850,7 +1853,7 @@ def institution_admin_hierarchy(inst_id: str):
                                         'institution_id': inst_id,
                                         'academic_cycle_id': selected_year_id,
                                         'type': 'department',
-                                        'created_at': datetime.datetime.now(datetime.timezone.utc),
+                                        'created_at': datetime.now(timezone.utc),
                                         'created_by': current_user.get('email', 'admin') if current_user else 'admin'
                                     }
                                     
@@ -1972,7 +1975,7 @@ def institution_admin_hierarchy(inst_id: str):
                                                 'school_id': school_id,
                                                 'institution_id': inst_id,
                                                 'academic_cycle_id': selected_year_id,
-                                                'created_at': datetime.datetime.now(datetime.timezone.utc),
+                                                'created_at': datetime.now(timezone.utc),
                                                 'created_by': current_user.get('email', 'admin') if current_user else 'admin'
                                             }
                                             
@@ -2587,8 +2590,8 @@ def institution_admin_extended_profiles(inst_id: str):
                                 'academic_cycle_id': selected_year_id,
                                 'headers': headers,
                                 'needs_supporting_docs': needs_docs.value,
-                                'created_at': datetime.datetime.now(datetime.timezone.utc),
-                                'updated_at': datetime.datetime.now(datetime.timezone.utc),
+                                'created_at': datetime.now(timezone.utc),
+                                'updated_at': datetime.now(timezone.utc),
                                 'created_by': current_user.get('email', 'admin') if current_user else 'admin'
                             }
                             
@@ -3163,7 +3166,7 @@ def institution_admin_spreadsheets(inst_id: str):
                             collection = criterias_col if sheet['type'] == 'criteria' else extended_profiles_col
                             collection.update_one(
                                 {'_id': sheet['data']['_id']},
-                                {'$set': {'headers': new_headers, 'updated_at': datetime.datetime.now()}}
+                                {'$set': {'headers': new_headers, 'updated_at': datetime.now()}}
                             )
                             
                             ui.notify('Headers updated successfully!', color='positive')
@@ -3319,7 +3322,7 @@ def institution_admin_users(inst_id: str):
                                 'password': password.value.strip(),  # In real app, hash this
                                 'institution_id': inst_id,
                                 'status': 'active',
-                                'created_at': datetime.datetime.now(),
+                                'created_at': datetime.now(),
                                 'last_login': None
                             }
                             
@@ -3514,7 +3517,7 @@ def program_admin_submissions(program_id: str):
     """Program admin page to view their own submissions"""
     add_beautiful_global_styles()
     
-    from bson import ObjectId
+    # Get program and institution data
     program = programs_col.find_one({'_id': ObjectId(program_id)})
     institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])}) if program else None
     def content():
@@ -3556,60 +3559,60 @@ def program_admin_submissions(program_id: str):
                 # Get current user
                 current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
                 # Get submissions for this program and user (show both drafts and submitted)
-                submissions = list(criteria_submissions_col.find({
-                    'program_id': ObjectId(program_id),
-                    'submitted_by': current_user_email
-                }).sort('submitted_at', -1))
-                if submissions:
-                    ui.label(f'Total Submissions: {len(submissions)}').style(
-                        'font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.5rem; text-align: center;'
+        submissions = list(criteria_submissions_col.find({
+            'program_id': ObjectId(program_id),
+            'submitted_by': current_user_email
+        }).sort('submitted_at', -1))
+        if submissions:
+            ui.label(f'Total Submissions: {len(submissions)}').style(
+                'font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.5rem; text-align: center;'
+            )
+            for submission in submissions:
+                with ui.card().style('background: white; border: 1px solid #e9ecef; padding: 1.5rem; margin-bottom: 1rem; border-radius: 10px;'):
+                    with ui.row().style('justify-content: space-between; align-items: center; margin-bottom: 1rem;'):
+                        ui.label(f"📋 {submission.get('status', 'Unknown').title()}").style(
+                                            'font-size: 1.2rem; font-weight: bold; color: rgb(154, 44, 84);'
+                        )
+                        status_color = 'success' if submission.get('status') == 'submitted' else 'warning'
+                        ui.label(submission.get('status', 'Unknown').title()).style(
+                            f'background: var(--{status_color}-color); color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600;'
+                        )
+                    # Get criteria details
+                    criteria = criterias_col.find_one({'_id': submission.get('criteria_id')})
+                    criteria_name = criteria.get('name', 'Unknown Criteria') if criteria else 'Unknown Criteria'
+                    ui.label(f"Criteria: {criteria_name}").style(
+                        'font-size: 1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 0.5rem;'
                     )
-                    for submission in submissions:
-                        with ui.card().style('background: white; border: 1px solid #e9ecef; padding: 1.5rem; margin-bottom: 1rem; border-radius: 10px;'):
-                            with ui.row().style('justify-content: space-between; align-items: center; margin-bottom: 1rem;'):
-                                ui.label(f"📋 {submission.get('status', 'Unknown').title()}").style(
-                                    'font-size: 1.2rem; font-weight: bold; color: rgb(154, 44, 84);'
-                                )
-                                status_color = 'success' if submission.get('status') == 'submitted' else 'warning'
-                                ui.label(submission.get('status', 'Unknown').title()).style(
-                                    f'background: var(--{status_color}-color); color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600;'
-                                )
-                            # Get criteria details
-                            criteria = criterias_col.find_one({'_id': submission.get('criteria_id')})
-                            criteria_name = criteria.get('name', 'Unknown Criteria') if criteria else 'Unknown Criteria'
-                            ui.label(f"Criteria: {criteria_name}").style(
-                                'font-size: 1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 0.5rem;'
-                            )
-                            ui.label(f"Submitted by: {submission.get('submitted_by', 'Unknown')}").style(
-                                'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
-                            )
-                            ui.label(f"Submitted at: {submission.get('submitted_at', 'Unknown').strftime('%Y-%m-%d %H:%M') if hasattr(submission.get('submitted_at'), 'strftime') else submission.get('submitted_at', 'Unknown')}").style(
-                                'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
-                            )
-                            ui.label(f"Data rows: {len(submission.get('data', []))}").style(
-                                'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;'
-                            )
-                            # Show data preview
-                            data = submission.get('data', [])
-                            if data:
-                                with ui.expansion('📊 View Data', icon='visibility').style('margin-top: 1rem;'):
-                                    for i, row in enumerate(data[:5]):  # Show first 5 rows
-                                        with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; padding: 0.8rem; margin-bottom: 0.5rem; border-radius: 6px;'):
-                                            ui.label(f"Row {i+1}").style(
-                                                'font-weight: bold; color: var(--text-primary); margin-bottom: 0.3rem;'
-                                            )
-                                            for header, value in row.items():
-                                                ui.label(f"{header}: {value}").style(
-                                                    'font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.1rem;'
-                                                )
-                                    if len(data) > 5:
-                                        ui.label(f"... and {len(data) - 5} more rows").style(
-                                            'font-style: italic; color: var(--text-secondary); text-align: center; margin-top: 0.5rem;'
+                    ui.label(f"Submitted by: {submission.get('submitted_by', 'Unknown')}").style(
+                        'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
+                    )
+                    ui.label(f"Submitted at: {submission.get('submitted_at', 'Unknown').strftime('%Y-%m-%d %H:%M') if hasattr(submission.get('submitted_at'), 'strftime') else submission.get('submitted_at', 'Unknown')}").style(
+                        'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
+                    )
+                    ui.label(f"Data rows: {len(submission.get('data', []))}").style(
+                        'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;'
+                    )
+                    # Show data preview
+                    data = submission.get('data', [])
+                    if data:
+                        with ui.expansion('📊 View Data', icon='visibility').style('margin-top: 1rem;'):
+                            for i, row in enumerate(data[:5]):  # Show first 5 rows
+                                with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; padding: 0.8rem; margin-bottom: 0.5rem; border-radius: 6px;'):
+                                    ui.label(f"Row {i+1}").style(
+                                        'font-weight: bold; color: var(--text-primary); margin-bottom: 0.3rem;'
+                                    )
+                                    for header, value in row.items():
+                                        ui.label(f"{header}: {value}").style(
+                                            'font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.1rem;'
                                         )
-                else:
-                    ui.label('No submissions found for this program.').style(
-                        'color: var(--text-secondary); font-style: italic; text-align: center; padding: 2rem;'
-                    )
+                            if len(data) > 5:
+                                ui.label(f"... and {len(data) - 5} more rows").style(
+                                    'font-style: italic; color: var(--text-secondary); text-align: center; margin-top: 0.5rem;'
+                                )
+        else:
+            ui.label('No submissions found for this program.').style(
+                'color: var(--text-secondary); font-style: italic; text-align: center; padding: 2rem;'
+            )
     content()
 
 # Department Admin Submissions Page
@@ -3625,102 +3628,101 @@ def department_admin_submissions(department_id: str):
         def content():
             from bson import ObjectId
             # Sidebar and navigation
-            with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
-                with ui.column().style('width: 280px; background: var(--surface); border-right: 2px solid var(--border); padding: 0; height: 100vh; overflow-y: auto;'):
-                    with ui.card().style('background: linear-gradient(135deg, var(--primary-color), var(--primary-dark)); color: white; padding: 1.5rem; margin: 1rem; border: none; border-radius: 12px; box-shadow: var(--shadow);'):
-                        ui.element('div').style('width: 60px; height: 60px; background: rgba(255,255,255,0.2); border-radius: 50%; margin: 0 auto 1rem; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold;').inner_html = '🎓'
-                        ui.label(institution.get('name', 'Institution')).style('font-size: 1.2rem; font-weight: bold; text-align: center; margin-bottom: 0.5rem;')
-                        ui.separator().style('margin: 1rem 0; background: rgba(255,255,255,0.3);')
-                        current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
-                        ui.label(current_user_email).style('font-size: 0.9rem; text-align: center; opacity: 0.9; margin-bottom: 0.5rem;')
-                        ui.label('Program Admin').style('font-size: 0.9rem; text-align: center; opacity: 0.8;')
-                    with ui.column().style('padding: 1rem; gap: 0.5rem;'):
-                        with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;'):
-                            ui.label('📊 OVERVIEW').style('font-size: 0.85rem; font-weight: 700; color: rgb(154, 44, 84); margin-bottom: 1rem; text-align: left; letter-spacing: 1px; text-transform: uppercase;')
-                            overview_items = [
-                                ('🏠', 'Dashboard', f'/program_admin/{program_id}'),
-                                ('📊', 'Criteria Management', f'/program_admin/{program_id}/criterias'),
-                                ('👤', 'Extended Profiles', f'/program_admin/{program_id}/profiles'),
-                                ('📥', 'My Submissions', f'/program_admin/{program_id}/submissions'),
-                            ]
-                            for icon, label, url in overview_items:
-                                ui.button(f'{icon} {label}', on_click=lambda u=url: ui.navigate.to(u)).style(
-                                    f'width: 100%; justify-content: flex-start; margin-bottom: 0.5rem; text-align: left; '
-                                    f'background: white; color: var(--text-primary); border: 1px solid #e9ecef; '
-                                    f'padding: 0.75rem 1rem; border-radius: 8px; '
-                                    f'transition: all 0.3s ease; font-weight: 500;'
-                                ).on('mouseenter', lambda e: ui.run_javascript(f'event.target.style.background = "rgb(154, 44, 84)"; event.target.style.color = "white"; event.target.style.borderColor = "rgb(154, 44, 84)";')).on('mouseleave', lambda e: ui.run_javascript(f'event.target.style.background = "white"; event.target.style.color = "var(--text-primary)"; event.target.style.borderColor = "#e9ecef";'))
-                            ui.separator().style('margin: 1rem 0; background: #e9ecef;')
-                            ui.button('🚪 Logout', on_click=lambda: ui.navigate.to('/')).style(
+    with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
+        with ui.column().style('width: 280px; background: var(--surface); border-right: 2px solid var(--border); padding: 0; height: 100vh; overflow-y: auto;'):
+            with ui.card().style('background: linear-gradient(135deg, var(--primary-color), var(--primary-dark)); color: white; padding: 1.5rem; margin: 1rem; border: none; border-radius: 12px; box-shadow: var(--shadow);'):
+                ui.element('div').style('width: 60px; height: 60px; background: rgba(255,255,255,0.2); border-radius: 50%; margin: 0 auto 1rem; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold;').inner_html = '🎓'
+                ui.label(institution.get('name', 'Institution')).style('font-size: 1.2rem; font-weight: bold; text-align: center; margin-bottom: 0.5rem;')
+                ui.separator().style('margin: 1rem 0; background: rgba(255,255,255,0.3);')
+                current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
+                ui.label(current_user_email).style('font-size: 0.9rem; text-align: center; opacity: 0.9; margin-bottom: 0.5rem;')
+                ui.label('Program Admin').style('font-size: 0.9rem; text-align: center; opacity: 0.8;')
+            with ui.column().style('padding: 1rem; gap: 0.5rem;'):
+                with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;'):
+                    ui.label('📊 OVERVIEW').style('font-size: 0.85rem; font-weight: 700; color: rgb(154, 44, 84); margin-bottom: 1rem; text-align: left; letter-spacing: 1px; text-transform: uppercase;')
+                    overview_items = [
+                        ('🏠', 'Dashboard', f'/program_admin/{program_id}'),
+                        ('📊', 'Criteria Management', f'/program_admin/{program_id}/criterias'),
+                        ('👤', 'Extended Profiles', f'/program_admin/{program_id}/profiles'),
+                        ('📥', 'My Submissions', f'/program_admin/{program_id}/submissions'),
+                    ]
+                    for icon, label, url in overview_items:
+                        ui.button(f'{icon} {label}', on_click=lambda u=url: ui.navigate.to(u)).style(
+                            f'width: 100%; justify-content: flex-start; margin-bottom: 0.5rem; text-align: left; '
+                            f'background: white; color: var(--text-primary); border: 1px solid #e9ecef; '
+                            f'padding: 0.75rem 1rem; border-radius: 8px; '
+                            f'transition: all 0.3s ease; font-weight: 500;'
+                        ).on('mouseenter', lambda e: ui.run_javascript(f'event.target.style.background = "rgb(154, 44, 84)"; event.target.style.color = "white"; event.target.style.borderColor = "rgb(154, 44, 84)";')).on('mouseleave', lambda e: ui.run_javascript(f'event.target.style.background = "white"; event.target.style.color = "var(--text-primary)"; event.target.style.borderColor = "#e9ecef";'))
+                    ui.separator().style('margin: 1rem 0; background: #e9ecef;')
+                    ui.button('🚪 Logout', on_click=lambda: ui.navigate.to('/')).style(
                                 'width: 100%; justify-content: center; background: #dc3545; color: white; border: 1px solid #dc3545; padding: 0.75rem 1rem; border-radius: 8px; transition: all 0.3s ease; font-weight: 600;'
-                            ).on('mouseenter', lambda e: ui.run_javascript(f'event.target.style.background = "#c82333"; event.target.style.borderColor = "#c82333";')).on('mouseleave', lambda e: ui.run_javascript(f'event.target.style.background = "#dc3545"; event.target.style.borderColor = "#dc3545";'))
-                # Main content
-                with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-                    ui.label('📥 My Submissions').style(
-                        f'font-size: 2rem; font-weight: bold; color: rgb(154, 44, 84); margin-bottom: 1rem; text-align: center;'
+                    ).on('mouseenter', lambda e: ui.run_javascript(f'event.target.style.background = "#c82333"; event.target.style.borderColor = "#c82333";')).on('mouseleave', lambda e: ui.run_javascript(f'event.target.style.background = "#dc3545"; event.target.style.borderColor = "#dc3545";'))
+        # Main content
+        with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
+            ui.label('📥 My Submissions').style(
+                f'font-size: 2rem; font-weight: bold; color: rgb(154, 44, 84); margin-bottom: 1rem; text-align: center;'
+            )
+            # Get current user
+            current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
+            # Get submissions for this program and user
+        submissions = list(criteria_submissions_col.find({
+                'program_id': ObjectId(program_id),
+            'submitted_by': current_user_email
+        }).sort('submitted_at', -1))
+        if submissions:
+            ui.label(f'Total Submissions: {len(submissions)}').style(
+                'font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.5rem; text-align: center;'
+            )
+            for submission in submissions:
+                with ui.card().style('background: white; border: 1px solid #e9ecef; padding: 1.5rem; margin-bottom: 1rem; border-radius: 10px;'):
+                    with ui.row().style('justify-content: space-between; align-items: center; margin-bottom: 1rem;'):
+                        ui.label(f"📋 {submission.get('status', 'Unknown').title()}").style(
+                                'font-size: 1.2rem; font-weight: bold; color: rgb(154, 44, 84);'
+                        )
+                        status_color = 'success' if submission.get('status') == 'submitted' else 'warning'
+                        ui.label(submission.get('status', 'Unknown').title()).style(
+                            f'background: var(--{status_color}-color); color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600;'
+                        )
+                    # Get criteria details
+                    criteria = criterias_col.find_one({'_id': submission.get('criteria_id')})
+                    criteria_name = criteria.get('name', 'Unknown Criteria') if criteria else 'Unknown Criteria'
+                    ui.label(f"Criteria: {criteria_name}").style(
+                        'font-size: 1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 0.5rem;'
                     )
-                    # Get current user
-                    current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
-                    # Get submissions for this program and user
-                    submissions = list(criteria_submissions_col.find({
-                        'program_id': ObjectId(program_id),
-                        'submitted_by': current_user_email
-                    }).sort('submitted_at', -1))
-                    if submissions:
-                        ui.label(f'Total Submissions: {len(submissions)}').style(
-                            'font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.5rem; text-align: center;'
-                        )
-                        for submission in submissions:
-                            with ui.card().style('background: white; border: 1px solid #e9ecef; padding: 1.5rem; margin-bottom: 1rem; border-radius: 10px;'):
-                                with ui.row().style('justify-content: space-between; align-items: center; margin-bottom: 1rem;'):
-                                    ui.label(f"📋 {submission.get('status', 'Unknown').title()}").style(
-                                        'font-size: 1.2rem; font-weight: bold; color: rgb(154, 44, 84);'
+                    ui.label(f"Submitted by: {submission.get('submitted_by', 'Unknown')}").style(
+                        'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
+                    )
+                    ui.label(f"Submitted at: {submission.get('submitted_at', 'Unknown').strftime('%Y-%m-%d %H:%M') if hasattr(submission.get('submitted_at'), 'strftime') else submission.get('submitted_at', 'Unknown')}").style(
+                        'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
+                    )
+                    ui.label(f"Data rows: {len(submission.get('data', []))}").style(
+                        'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;'
+                    )
+                    # Show data preview
+                    data = submission.get('data', [])
+                    if data:
+                        with ui.expansion('📊 View Data', icon='visibility').style('margin-top: 1rem;'):
+                            for i, row in enumerate(data[:5]):  # Show first 5 rows
+                                with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; padding: 0.8rem; margin-bottom: 0.5rem; border-radius: 6px;'):
+                                    ui.label(f"Row {i+1}").style(
+                                        'font-weight: bold; color: var(--text-primary); margin-bottom: 0.3rem;'
                                     )
-                                    status_color = 'success' if submission.get('status') == 'submitted' else 'warning'
-                                    ui.label(submission.get('status', 'Unknown').title()).style(
-                                        f'background: var(--{status_color}-color); color: white; padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600;'
-                                    )
-                                # Get criteria details
-                                criteria = criterias_col.find_one({'_id': submission.get('criteria_id')})
-                                criteria_name = criteria.get('name', 'Unknown Criteria') if criteria else 'Unknown Criteria'
-                                ui.label(f"Criteria: {criteria_name}").style(
-                                    'font-size: 1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 0.5rem;'
+                                    for header, value in row.items():
+                                        ui.label(f"{header}: {value}").style(
+                                            'font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.1rem;'
+                                        )
+                            if len(data) > 5:
+                                ui.label(f"... and {len(data) - 5} more rows").style(
+                                    'font-style: italic; color: var(--text-secondary); text-align: center; margin-top: 0.5rem;'
                                 )
-                                ui.label(f"Submitted by: {submission.get('submitted_by', 'Unknown')}").style(
-                                    'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
-                                )
-                                ui.label(f"Submitted at: {submission.get('submitted_at', 'Unknown').strftime('%Y-%m-%d %H:%M') if hasattr(submission.get('submitted_at'), 'strftime') else submission.get('submitted_at', 'Unknown')}").style(
-                                    'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
-                                )
-                                ui.label(f"Data rows: {len(submission.get('data', []))}").style(
-                                    'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;'
-                                )
-                                # Show data preview
-                                data = submission.get('data', [])
-                                if data:
-                                    with ui.expansion('📊 View Data', icon='visibility').style('margin-top: 1rem;'):
-                                        for i, row in enumerate(data[:5]):  # Show first 5 rows
-                                            with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; padding: 0.8rem; margin-bottom: 0.5rem; border-radius: 6px;'):
-                                                ui.label(f"Row {i+1}").style(
-                                                    'font-weight: bold; color: var(--text-primary); margin-bottom: 0.3rem;'
-                                                )
-                                                for header, value in row.items():
-                                                    ui.label(f"{header}: {value}").style(
-                                                        'font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.1rem;'
-                                                    )
-                                        if len(data) > 5:
-                                            ui.label(f"... and {len(data) - 5} more rows").style(
-                                                'font-style: italic; color: var(--text-secondary); text-align: center; margin-top: 0.5rem;'
-                                            )
-                    else:
-                        ui.label('No submissions found for this program.').style(
-                            'color: var(--text-secondary); font-style: italic; text-align: center; padding: 2rem;'
-                        )
-                content()
+        else:
+                ui.label('No submissions found for this program.').style(
+                'color: var(--text-secondary); font-style: italic; text-align: center; padding: 2rem;'
+            )
         
-                # Main content
-                with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-                    content()
+        # Main content
+        with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
+            content()
 
 @ui.page('/institution_admin/{inst_id}/academic_years')
 def institution_admin_academic_years(inst_id: str):
@@ -3783,8 +3785,8 @@ def institution_admin_academic_years(inst_id: str):
                                 'name': year_name.value,
                                 'description': year_description.value,
                                 'institution_id': inst_id,
-                                'created_at': datetime.datetime.now(datetime.timezone.utc),
-                                'updated_at': datetime.datetime.now(datetime.timezone.utc),
+                                'created_at': datetime.now(timezone.utc),
+                                'updated_at': datetime.now(timezone.utc),
                                 'is_locked': False
                             }
                             
@@ -4080,7 +4082,7 @@ def institution_admin_audit_logs(inst_id: str):
                                         with ui.element('tr').style(f'background: {row_bg};'):
                                             # Timestamp
                                             with ui.element('td').style('padding: 12px; border: 1px solid var(--border); white-space: nowrap;'):
-                                                timestamp = log.get('timestamp', datetime.datetime.now())
+                                                timestamp = log.get('timestamp', datetime.now(timezone.utc))
                                                 if isinstance(timestamp, str):
                                                     ui.label(timestamp)
                                                 else:
@@ -4269,22 +4271,23 @@ def login_page():
             current_user = {
                 'email': user['email'],
                 'role': user.get('role', ''),
-                'institution_id': user.get('institution_id', ''),
-                'school_id': user.get('school_id'),
-                'program_id': user.get('program_id'),
-                'department_id': user.get('department_id'),
-                'must_change_password': user.get('must_change_password', False)
+                'institution_id': str(user.get('institution_id', '')),
+                'school_id': str(user.get('school_id', '')),
+                'program_id': str(user.get('program_id', '')),
+                'department_id': str(user.get('department_id', '')),
+                'must_change_password': user.get('must_change_password', False),
+                'name': user.get('name', user['email'].split('@')[0])
             }
+            
+            # Store in app.storage for persistence
+            if not hasattr(app.storage, 'user'):
+                app.storage.user = {}
+            app.storage.user['user'] = current_user
             
         except Exception as e:
             print(f"DEBUG: Database error during login: {str(e)}")
             ui.notify(f'Database connection error: {str(e)}', color='negative')
             return
-        
-        # Store in app.storage for persistence
-        if not hasattr(app.storage, 'user'):
-            app.storage.user = {}
-        app.storage.user['current_user'] = current_user
         
         # Log successful login
         log_audit_action(
@@ -4538,233 +4541,997 @@ async def move_program(request):
         traceback.print_exc()
         return {'success': False, 'message': f'Failed to move program: {str(e)}'}
 
+# Reusable Program Admin Sidebar
+def program_admin_sidebar(program_id: str, active_page: str = 'dashboard'):
+    """Reusable sidebar for program admin pages with improved styling"""
+    from bson import ObjectId
+    
+    # Get program details
+    program = programs_col.find_one({'_id': ObjectId(program_id)})
+    
+    with ui.column().classes('fixed left-0 top-0 h-full w-64 bg-gradient-to-b from-gray-800 to-gray-900 text-white p-4 z-50'):
+        # Logo and Program Info
+        with ui.column().classes('items-center mb-8 pt-4'):
+            ui.icon('school', size='2.5rem', color='white')
+            if program:
+                ui.label(program.get('name', 'Program')).classes('text-lg font-bold text-center text-white mt-2')
+                ui.label('Program Admin').classes('text-sm text-gray-300')
+            else:
+                ui.label('Program Admin').classes('text-lg font-bold text-white')
+        
+        # Navigation Links
+        nav_items = [
+            {'name': 'Dashboard', 'icon': 'dashboard', 'page': 'dashboard'},
+            {'name': 'Criteria', 'icon': 'checklist', 'page': 'criteria'},
+            {'name': 'Extended Profiles', 'icon': 'groups', 'page': 'profiles'},
+            {'name': 'Submissions', 'icon': 'send', 'page': 'submissions'},
+        ]
+        
+        with ui.column().classes('w-full mt-4 space-y-1'):
+            for item in nav_items:
+                is_active = active_page == item['page']
+                with ui.button('', 
+                             on_click=lambda _, p=item['page']: ui.navigate.to(f'/program_admin/{program_id}/{p}')) \
+                     .classes(f'w-full justify-start text-left py-3 px-4 rounded-lg transition-all duration-200 ' + 
+                            f'{"bg-indigo-600 text-white shadow-md" if is_active else "text-gray-300 hover:bg-gray-700 hover:text-white"}') \
+                     .props('flat'):
+                    ui.icon(item['icon']).classes('mr-3')
+                    ui.label(item['name']).classes('text-sm font-medium')
+        
+        # Logout and User Section
+        with ui.column().classes('mt-auto mb-6'):
+            ui.separator().classes('bg-gray-700 my-4')
+            
+            # User Info
+            if 'current_user' in app.storage.user:
+                user = app.storage.user['current_user']
+                with ui.row().classes('items-center p-2 rounded-lg hover:bg-gray-700 cursor-pointer'):
+                    ui.icon('account_circle', size='lg').classes('text-gray-300')
+                    with ui.column().classes('ml-2'):
+                        ui.label(f"{user.get('first_name', '')} {user.get('last_name', '')}") \
+                            .classes('text-sm font-medium text-white')
+                        ui.label('Program Admin').classes('text-xs text-gray-400')
+            
+            # Logout Button
+            ui.button('Sign Out', 
+                     on_click=lambda: ui.navigate.to('/logout'), 
+                     icon='logout') \
+                .classes('w-full mt-4 bg-gray-700 text-white hover:bg-gray-600 justify-start')
+
 # Program Admin Pages
 @ui.page('/program_admin/{program_id}')
+def program_admin_redirect(program_id: str):
+    """Redirect from /program_admin/{program_id} to /program_admin/{program_id}/dashboard"""
+    ui.navigate.to(f'/program_admin/{program_id}/dashboard')
+    return "Redirecting to dashboard..."
+
+@ui.page('/program_admin/{program_id}/dashboard')
 def program_admin_dashboard(program_id: str):
-    """Program admin dashboard - only shows criteria and extended profiles"""
+    """Program admin dashboard showing key metrics and overview"""
     from bson import ObjectId
-    program = programs_col.find_one({'_id': ObjectId(program_id)})
-    if not program:
-        ui.notify('Program not found', color='negative')
-        ui.navigate.to('/')
-        return
-    institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
-    main_color = institution.get('theme_color', 'rgb(154, 44, 84)') if institution else 'rgb(154, 44, 84)'
-
-    # Gather stats
-    total_criterias = criterias_col.count_documents({'program_id': ObjectId(program_id)})
-    total_profiles = extended_profiles_col.count_documents({'program_id': ObjectId(program_id)})
-    pending_submissions = criteria_submissions_col.count_documents({'program_id': ObjectId(program_id), 'status': 'draft'})
-    completed_submissions = criteria_submissions_col.count_documents({'program_id': ObjectId(program_id), 'status': 'submitted'})
-
-    def content():
-        with ui.row().style('width: 100%; gap: 1rem;'):
-            with ui.card().style('flex: 1; padding: 1.5rem; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;'):
-                ui.label(str(total_criterias)).style('font-size: 2.5rem; font-weight: bold; margin-bottom: 0.5rem;')
-                ui.label('Criterias').style('font-size: 1rem;')
-            with ui.card().style('flex: 1; padding: 1.5rem; text-align: center; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white;'):
-                ui.label(str(total_profiles)).style('font-size: 2.5rem; font-weight: bold; margin-bottom: 0.5rem;')
-                ui.label('Extended Profiles').style('font-size: 1rem;')
-            with ui.card().style('flex: 1; padding: 1.5rem; text-align: center; background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white;'):
-                ui.label(str(pending_submissions)).style('font-size: 2.5rem; font-weight: bold; margin-bottom: 0.5rem;')
-                ui.label('Draft Submissions').style('font-size: 1rem;')
-            with ui.card().style('flex: 1; padding: 1.5rem; text-align: center; background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white;'):
-                ui.label(str(completed_submissions)).style('font-size: 2.5rem; font-weight: bold; margin-bottom: 0.5rem;')
-                ui.label('Completed').style('font-size: 1rem;')
-
-        # ...additional main content can go here...
-
-    # Sidebar + main content layout
-    with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
-        program_admin_sidebar(program_id, institution)
-        with ui.column().style('margin-left: 200px; flex: 1; padding: 2rem; overflow-y: auto; height: 100vh;'):
-            content()
-
-# Program Admin Additional Pages
-@ui.page('/program_admin/{program_id}/criterias')
-def program_admin_criterias(program_id: str):
-    """Program admin criteria management page"""
-    add_beautiful_global_styles()
+    import datetime  # Using module directly for consistency
+    
+    # Initialize collections
+    global criteria_submissions_col, extended_profile_submissions_col, audit_logs_col
+    criteria_submissions_col = db['criteria_submissions']
+    extended_profile_submissions_col = db['extended_profile_submissions']
+    audit_logs_col = db['audit_logs']
     
     # Check authentication
     if not check_auth():
-        ui.notify('Please log in first', color='negative')
         ui.navigate.to('/')
         return
-
-    from bson import ObjectId
+    
+    # Get program data
     program = programs_col.find_one({'_id': ObjectId(program_id)})
     if not program:
         ui.notify('Program not found', color='negative')
+        ui.navigate.to('/dashboard')
+        return
+    
+    # Get institution data
+    institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
+    
+    # Initialize collections if they don't exist
+    if 'criteria_submissions_col' not in globals():
+        criteria_submissions_col = db['criteria_submissions']
+    if 'extended_profile_submissions_col' not in globals():
+        extended_profile_submissions_col = db['extended_profile_submissions']
+    if 'audit_logs_col' not in globals():
+        audit_logs_col = db['audit_logs']
+    
+    # Get criteria and submissions count
+    total_criteria = criterias_col.count_documents({'institution_id': str(program['institution_id'])})
+    submitted_criteria = criteria_submissions_col.count_documents({
+        'program_id': program_id,
+        'status': 'submitted'
+    })
+    
+    # Get extended profiles and submissions count
+    total_profiles = extended_profiles_col.count_documents({'institution_id': str(program['institution_id'])})
+    submitted_profiles = extended_profile_submissions_col.count_documents({
+        'program_id': program_id,
+        'status': 'submitted'
+    })
+    
+    # Calculate completion percentages
+    criteria_percent = int((submitted_criteria / total_criteria * 100) if total_criteria > 0 else 0)
+    profiles_percent = int((submitted_profiles / total_profiles * 100) if total_profiles > 0 else 0)
+    
+    # Get recent activity
+    week_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    recent_activity = list(audit_logs_col.find({
+        'program_id': program_id,
+        'timestamp': {'$gte': week_ago}
+    }).sort('timestamp', -1).limit(5))
+    
+    # Apply global styles
+    add_beautiful_global_styles()
+    
+    with ui.column().classes('w-full min-h-screen bg-gray-50'):
+        # Sidebar
+        program_admin_sidebar(program_id, 'dashboard')
+        
+        # Main content area with left margin for sidebar
+        with ui.column().classes('ml-64 p-8 bg-gray-50 min-h-screen'):
+            # Header
+            with ui.row().classes('w-full justify-between items-center mb-8'):
+                with ui.column():
+                    ui.label('Program Dashboard').classes('text-2xl font-bold text-gray-800')
+                    breadcrumb = f"{institution.get('name', 'Institution')} > {program.get('name', 'Program')}"
+                    ui.label(breadcrumb).classes('text-gray-500 text-sm')
+                
+                with ui.row().classes('items-center space-x-4'):
+                    ui.button('New Submission', 
+                            on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                            icon='add').classes('bg-primary-500 text-white hover:bg-primary-600')
+            
+            # Stats Cards
+            with ui.grid(columns=3).classes('w-full gap-6 mb-8'):
+                # Criteria Completion
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('checklist', size='2rem', color='indigo-600').classes('p-2 bg-indigo-50 rounded-lg mb-3')
+                        ui.label('Criteria Completion').classes('text-sm text-gray-500')
+                        with ui.row().classes('items-center justify-between w-full mt-2'):
+                            ui.label(f'{submitted_criteria} of {total_criteria}').classes('text-2xl font-bold text-gray-800')
+                            ui.label(f'{criteria_percent}%').classes('text-sm font-medium text-indigo-600')
+                        ui.linear_progress(value=criteria_percent/100, show_value=False).classes('w-full mt-2 h-2')
+                
+                # Profiles Completion
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('person', size='2rem', color='teal-600').classes('p-2 bg-teal-50 rounded-lg mb-3')
+                        ui.label('Profiles Completion').classes('text-sm text-gray-500')
+                        with ui.row().classes('items-center justify-between w-full mt-2'):
+                            ui.label(f'{submitted_profiles} of {total_profiles}').classes('text-2xl font-bold text-gray-800')
+                            ui.label(f'{profiles_percent}%').classes('text-sm font-medium text-teal-600')
+                        ui.linear_progress(value=profiles_percent/100, show_value=False).classes('w-full mt-2 h-2')
+                
+                # Recent Activity
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('update', size='2rem', color='purple-600').classes('p-2 bg-purple-50 rounded-lg mb-3')
+                        ui.label('Recent Activity').classes('text-sm text-gray-500')
+                        if recent_activity:
+                            for activity in recent_activity:
+                                with ui.row().classes('w-full py-2 border-b border-gray-100 last:border-0'):
+                                    ui.icon('circle', size='0.5rem', color='gray-400').classes('mt-1.5 mr-2')
+                                    with ui.column():
+                                        ui.label(activity.get('action', 'Activity')).classes('text-sm font-medium text-gray-800')
+                                        timestamp = activity.get('timestamp', datetime.now(datetime.UTC))
+                                        if hasattr(timestamp, 'strftime'):
+                                            timestamp_str = timestamp.strftime('%b %d, %I:%M %p')
+                                        else:
+                                            timestamp_str = 'Just now'
+                                        ui.label(f"{activity.get('user_name', 'System')} • {timestamp_str}").classes('text-xs text-gray-500')
+                        else:
+                            ui.label('No recent activity').classes('text-sm text-gray-400 mt-2')
+            
+            # Quick Actions
+            with ui.card().classes('w-full mb-8'):
+                with ui.column().classes('w-full p-4'):
+                    ui.label('Quick Actions').classes('text-lg font-semibold text-gray-700 mb-4')
+                    with ui.row().classes('w-full space-x-4'):
+                        ui.button('Submit Criteria', 
+                                on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                                icon='checklist').props('flat color=primary')
+                        ui.button('Submit Profile', 
+                                on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/profiles'),
+                                icon='person').props('flat color=teal')
+                        ui.button('View Submissions', 
+                                on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/submissions'),
+                                icon='list_alt').props('flat color=purple')
+                
+                # Quick Actions Section
+                with ui.column().classes('w-80'):
+                    with ui.card().classes('w-full border border-gray-100'):
+                        with ui.column().classes('w-full'):
+                            ui.label('Quick Actions').classes('text-lg font-semibold p-4 border-b')
+                            
+                            # Quick Action Buttons
+                            quick_actions = [
+                                {'icon': 'add_circle', 'label': 'Add New Criteria', 'color': 'primary', 'route': f'/program_admin/{program_id}/criteria/new'},
+                                {'icon': 'group_add', 'label': 'Add Profile', 'color': 'teal', 'route': f'/program_admin/{program_id}/profiles/new'},
+                                {'icon': 'upload_file', 'label': 'Import Data', 'color': 'indigo', 'route': f'/program_admin/{program_id}/import'}
+                            ]
+                            
+                            for action in quick_actions:
+                                with ui.button('', on_click=lambda _, r=action['route']: ui.navigate.to(r)) \
+                                     .classes(f'w-full justify-start mb-2 text-{action["color"]}-600 hover:bg-{action["color"]}-50') \
+                                     .props('flat'):
+                                    ui.icon(action['icon']).classes(f'mr-3 text-{action["color"]}-500')
+                                    ui.label(action['label']).classes('text-sm font-medium')
+                    
+                    # Help Card
+                    with ui.card().classes('w-full border border-gray-100 mt-4'):
+                        with ui.column().classes('w-full'):
+                            ui.label('Need Help?').classes('text-lg font-semibold p-4 border-b')
+                            ui.label('Having trouble or have questions? Our support team is here to help.').classes('text-sm text-gray-600 px-4 pb-4')
+                            ui.button('Contact Support', icon='support_agent', 
+                                     on_click=lambda: ui.navigate.to('/support')) \
+                                .classes('w-full mt-2 bg-gray-100 text-gray-700 hover:bg-gray-200')
+
+@ui.page('/program_admin/{program_id}/criteria')
+def program_admin_criteria(program_id: str):
+    """Program admin page to view and fill criteria"""
+    from bson import ObjectId
+    
+    # Check authentication
+    if not check_auth():
         ui.navigate.to('/')
         return
 
+    # Get program data
+    program = programs_col.find_one({'_id': ObjectId(program_id)})
+    if not program:
+        ui.notify('Program not found', color='negative')
+        ui.navigate.to('/dashboard')
+        return
+
+    # Get institution data
     institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
-    main_color = institution.get('theme_color', 'rgb(154, 44, 84)') if institution else 'rgb(154, 44, 84)'
-
-    def content():
-        ui.label('📊 Criteria Management').style(
-            f'font-size: 2rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
-        )
-        ui.label(f'Program: {program.get("name", "Unknown")}').style(
-            'font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 2rem;'
-        )
-        criterias = list(criterias_col.find({'institution_id': program['institution_id'], 'scope_type': 'program_based'}))
-        if criterias:
-            for criteria in criterias:
-                with ui.card().style('margin-bottom: 1rem; padding: 1rem;'):
-                    ui.label(criteria.get('name', 'Unnamed Criteria')).style('font-weight: bold;')
-                    ui.button('Fill', on_click=lambda c=criteria: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{c["_id"]}')).style('margin-top: 0.5rem;')
-        else:
-            ui.label('No criteria available for this program.').style('color: var(--text-secondary); font-style: italic;')
-
-    # Sidebar + main content layout
-    with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
-        with ui.column().style('width: 280px; background: var(--surface); border-right: 2px solid var(--border); padding: 0; height: 100vh; position: fixed; left: 0; top: 0; overflow-y: hidden; z-index: 100;'):
-            with ui.card().style('background: linear-gradient(135deg, var(--primary-color), var(--primary-dark)); color: white; padding: 1.5rem; margin: 1rem; border: none; border-radius: 12px; box-shadow: var(--shadow);'):
-                ui.element('div').style('width: 60px; height: 60px; background: rgba(255,255,255,0.2); border-radius: 50%; margin: 0 auto 1rem; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold;').inner_html = '🎓'
-                ui.label(institution.get('name', 'Institution')).style('font-size: 1.2rem; font-weight: bold; text-align: center; margin-bottom: 0.5rem;')
-                ui.separator().style('margin: 1rem 0; background: rgba(255,255,255,0.3);')
-                current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
-                ui.label(current_user_email).style('font-size: 0.9rem; text-align: center; opacity: 0.9; margin-bottom: 0.5rem;')
-                ui.label('Program Admin').style('font-size: 0.9rem; text-align: center; opacity: 0.8;')
-            # ...existing sidebar navigation...
-        with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content()
+    
+    # Get all criteria for the institution with submission status
+    criteria_list = list(criterias_col.find({
+        'institution_id': str(program['institution_id'])
+    }))
+    
+    # Get submission status for each criteria
+    for criteria in criteria_list:
+        submission = criteria_submissions_col.find_one({
+            'criteria_id': str(criteria['_id']),
+            'program_id': program_id,
+            'status': 'submitted'
+        }) if 'criteria_submissions_col' in globals() else None
+        criteria['submission'] = submission
+    
+    # Apply global styles
+    add_beautiful_global_styles()
+    
+    with ui.column().classes('w-full min-h-screen bg-gray-50'):
+        # Sidebar
+        program_admin_sidebar(program_id, 'criteria')
+        
+        # Main content area with left margin for sidebar
+        with ui.column().classes('ml-64 p-8 bg-gray-50 min-h-screen'):
+            # Header
+            with ui.row().classes('w-full justify-between items-center mb-8'):
+                with ui.column():
+                    ui.label('Criteria Management').classes('text-2xl font-bold text-gray-800')
+                    ui.label(f'Manage and submit criteria for {program.get("name", "Program")}') \
+                        .classes('text-gray-500 text-sm')
+                
+                with ui.button('Add New Criteria', 
+                            on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/new'),
+                            icon='add') \
+                        .classes('bg-primary-500 text-white hover:bg-primary-600'):
+                    pass
+            
+            # Stats Cards
+            with ui.grid(columns=3).classes('w-full gap-6 mb-8'):
+                # Total Criterias
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('checklist', size='2rem', color='indigo-600').classes('p-2 bg-indigo-50 rounded-lg mb-3')
+                        ui.label('Total Criterias').classes('text-sm text-gray-500')
+                        ui.label(str(len(criteria_list))).classes('text-2xl font-bold text-gray-800 mt-1')
+                
+                # Filled Criterias
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('task_alt', size='2rem', color='green-600').classes('p-2 bg-green-50 rounded-lg mb-3')
+                        ui.label('Completed').classes('text-sm text-gray-500')
+                        filled = sum(1 for c in criteria_list if c.get('submission'))
+                        ui.label(f'{filled} of {len(criteria_list)}').classes('text-2xl font-bold text-gray-800 mt-1')
+                
+                # Completion Rate
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('trending_up', size='2rem', color='purple-600').classes('p-2 bg-purple-50 rounded-lg mb-3')
+                        ui.label('Completion Rate').classes('text-sm text-gray-500')
+                        rate = int((filled / len(criteria_list) * 100) if criteria_list else 0)
+                        ui.label(f'{rate}%').classes('text-2xl font-bold text-gray-800 mt-1')
+            
+            # Criteria List
+            if not criteria_list:
+                with ui.card().classes('w-full p-8 text-center'):
+                    ui.icon('info', size='3rem', color='gray-300').classes('mx-auto mb-4')
+                    ui.label('No criteria available').classes('text-xl font-medium text-gray-700 mb-2')
+                    ui.label('Please contact your institution admin to add criteria for your program.').classes('text-gray-500')
+            else:
+                with ui.card().classes('w-full border border-gray-100'):
+                    with ui.column().classes('w-full'):
+                        # Table Header
+                        with ui.row().classes('w-full bg-gray-50 p-4 border-b'):
+                            ui.label('Criteria').classes('flex-1 font-medium text-gray-600')
+                            ui.label('Status').classes('w-32 font-medium text-gray-600 text-center')
+                            ui.label('Last Updated').classes('w-48 font-medium text-gray-600')
+                            ui.label('Actions').classes('w-32 font-medium text-gray-600')
+                        
+                        # Criteria Rows
+                        for criteria in criteria_list:
+                            submission = criteria.get('submission')
+                            status = 'Submitted' if submission else 'Pending'
+                            status_color = 'green' if submission else 'gray'
+                            last_updated = submission.get('updated_at', '').strftime('%b %d, %Y') if submission else '--'
+                            
+                            with ui.row().classes('w-full p-4 border-b hover:bg-gray-50 items-center'):
+                                # Criteria Name and Description
+                                with ui.column().classes('flex-1'):
+                                    ui.label(criteria.get('name', 'Unnamed Criteria')).classes('font-medium text-gray-800')
+                                    if criteria.get('description'):
+                                        ui.label(criteria.get('description')).classes('text-sm text-gray-500 mt-1')
+                                
+                                # Status
+                                with ui.column().classes('w-32'):
+                                    ui.label(status).classes(f'px-2 py-1 rounded-full text-xs font-medium text-{status_color}-800 bg-{status_color}-100 text-center')
+                                
+                                # Last Updated
+                                ui.label(last_updated).classes('w-48 text-sm text-gray-600')
+                                
+                                # Actions
+                                with ui.row().classes('w-32 space-x-2'):
+                                    if submission:
+                                        ui.button('View', on_click=lambda c=criteria: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{c["_id"]}')) \
+                                            .props('flat color=primary size=sm').classes('text-xs')
+                                        ui.button('Edit', on_click=lambda c=criteria: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{c["_id"]}')) \
+                                            .props('outline color=primary size=sm').classes('text-xs')
+                                    else:
+                                        ui.button('Fill', on_click=lambda c=criteria: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{c["_id"]}')) \
+                                            .props('flat color=primary size=sm').classes('text-xs')
 
 @ui.page('/program_admin/{program_id}/profiles')
 def program_admin_profiles(program_id: str):
-    """Program admin extended profiles management page"""
-    add_beautiful_global_styles()
+    """Program admin page to view and fill extended profiles with improved UI"""
+    from bson import ObjectId
+    from datetime import datetime
     
     # Check authentication
     if not check_auth():
-        ui.notify('Please log in first', color='negative')
         ui.navigate.to('/')
         return
 
-    from bson import ObjectId
+    # Get program data
     program = programs_col.find_one({'_id': ObjectId(program_id)})
     if not program:
         ui.notify('Program not found', color='negative')
-        ui.navigate.to('/')
+        ui.navigate.to('/dashboard')
         return
 
+    # Get institution data
     institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
-    main_color = institution.get('theme_color', 'rgb(154, 44, 84)') if institution else 'rgb(154, 44, 84)'
-
-    def content():
-        ui.label('👤 Extended Profiles Management').style(
-            f'font-size: 2rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
-        )
-        ui.label(f'Program: {program.get("name", "Unknown")}').style(
-            'font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 2rem;'
-        )
-        profiles = list(extended_profiles_col.find({'institution_id': program['institution_id'], 'scope_type': 'program_based'}))
-        if profiles:
-            for profile in profiles:
-                with ui.card().style('margin-bottom: 1rem; padding: 1rem;'):
-                    ui.label(profile.get('name', 'Unnamed Profile')).style('font-weight: bold;')
-                    ui.button('Fill', on_click=lambda p=profile: ui.navigate.to(f'/program_admin/{program_id}/fill_profile/{p["_id"]}')).style('margin-top: 0.5rem;')
-        else:
-            ui.label('No extended profiles available for this program.').style('color: var(--text-secondary); font-style: italic;')
-
-    # Sidebar + main content layout
-    with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
-        with ui.column().style('width: 280px; background: var(--surface); border-right: 2px solid var(--border); padding: 0; height: 100vh; overflow-y: auto;'):
-            with ui.card().style('background: linear-gradient(135deg, var(--primary-color), var(--primary-dark)); color: white; padding: 1.5rem; margin: 1rem; border: none; border-radius: 12px; box-shadow: var(--shadow);'):
-                ui.element('div').style('width: 60px; height: 60px; background: rgba(255,255,255,0.2); border-radius: 50%; margin: 0 auto 1rem; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: bold;').inner_html = '🎓'
-                ui.label(institution.get('name', 'Institution')).style('font-size: 1.2rem; font-weight: bold; text-align: center; margin-bottom: 0.5rem;')
-                ui.separator().style('margin: 1rem 0; background: rgba(255,255,255,0.3);')
-                current_user_email = app.storage.user.get('current_user', {}).get('email', 'Unknown User') if hasattr(app.storage, 'user') else 'Unknown User'
-                ui.label(current_user_email).style('font-size: 0.9rem; text-align: center; opacity: 0.9; margin-bottom: 0.5rem;')
-                ui.label('Program Admin').style('font-size: 0.9rem; text-align: center; opacity: 0.8;')
-            # ...existing sidebar navigation...
-        with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content()
-
-# Department Admin Pages
-@ui.page('/department_admin/{department_id}')
-def department_admin_dashboard(department_id: str):
-    """Department admin dashboard - only shows criteria and extended profiles"""
+    
+    # Get all extended profiles for the institution with submission status
+    profiles_list = list(extended_profiles_col.find({
+        'institution_id': str(program['institution_id'])
+    }))
+    
+    # Get submission status for each profile
+    for profile in profiles_list:
+        submission = extended_profile_submissions_col.find_one({
+            'profile_id': str(profile['_id']),
+            'program_id': program_id,
+            'status': 'submitted'
+        }) if 'extended_profile_submissions_col' in globals() else None
+        profile['submission'] = submission
+    
+    # Apply global styles
     add_beautiful_global_styles()
+    
+    with ui.column().classes('w-full min-h-screen bg-gray-50'):
+        # Sidebar
+        program_admin_sidebar(program_id, 'profiles')
+        
+        # Main content area with left margin for sidebar
+        with ui.column().classes('ml-64 p-8 bg-gray-50 min-h-screen'):
+            # Header
+            with ui.row().classes('w-full justify-between items-center mb-8'):
+                with ui.column():
+                    ui.label('Extended Profiles').classes('text-2xl font-bold text-gray-800')
+                    ui.label(f'Manage extended profiles for {program.get("name", "Program")}') \
+                        .classes('text-gray-500 text-sm')
+                
+                with ui.button('Add New Profile', 
+                            on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/profiles/new'),
+                            icon='person_add') \
+                        .classes('bg-teal-500 text-white hover:bg-teal-600'):
+                    pass
+            
+            # Stats Cards
+            with ui.grid(columns=3).classes('w-full gap-6 mb-8'):
+                # Total Profiles
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('groups', size='2rem', color='teal-600').classes('p-2 bg-teal-50 rounded-lg mb-3')
+                        ui.label('Total Profiles').classes('text-sm text-gray-500')
+                        ui.label(str(len(profiles_list))).classes('text-2xl font-bold text-gray-800 mt-1')
+                
+                # Filled Profiles
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('assignment_turned_in', size='2rem', color='green-600').classes('p-2 bg-green-50 rounded-lg mb-3')
+                        ui.label('Completed').classes('text-sm text-gray-500')
+                        filled = sum(1 for p in profiles_list if p.get('submission'))
+                        ui.label(f'{filled} of {len(profiles_list)}').classes('text-2xl font-bold text-gray-800 mt-1')
+                
+                # Completion Rate
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('trending_up', size='2rem', color='purple-600').classes('p-2 bg-purple-50 rounded-lg mb-3')
+                        ui.label('Completion Rate').classes('text-sm text-gray-500')
+                        rate = int((filled / len(profiles_list) * 100) if profiles_list else 0)
+                        ui.label(f'{rate}%').classes('text-2xl font-bold text-gray-800 mt-1')
+            
+            # Profiles List
+            if not profiles_list:
+                with ui.card().classes('w-full p-8 text-center'):
+                    ui.icon('person_off', size='3rem', color='gray-300').classes('mx-auto mb-4')
+                    ui.label('No profiles available').classes('text-xl font-medium text-gray-700 mb-2')
+                    ui.label('Please contact your institution admin to add extended profiles for your program.').classes('text-gray-500')
+            else:
+                with ui.card().classes('w-full border border-gray-100'):
+                    with ui.column().classes('w-full'):
+                        # Table Header
+                        with ui.row().classes('w-full bg-gray-50 p-4 border-b'):
+                            ui.label('Profile').classes('flex-1 font-medium text-gray-600')
+                            ui.label('Status').classes('w-32 font-medium text-gray-600 text-center')
+                            ui.label('Last Updated').classes('w-48 font-medium text-gray-600')
+                            ui.label('Actions').classes('w-32 font-medium text-gray-600')
+                        
+                        # Profile Rows
+                        for profile in profiles_list:
+                            submission = profile.get('submission')
+                            status = 'Submitted' if submission else 'Pending'
+                            status_color = 'green' if submission else 'gray'
+                            last_updated = submission.get('updated_at', '').strftime('%b %d, %Y') if submission else '--'
+                            with ui.row().classes('w-full p-4 border-b hover:bg-gray-50 items-center'):
+                                # Profile Name and Description
+                                with ui.column().classes('flex-1'):
+                                    ui.label(profile.get('name', 'Unnamed Profile')).classes('font-medium text-gray-800')
+                                    if profile.get('description'):
+                                        ui.label(profile.get('description')).classes('text-sm text-gray-500 mt-1')
+                                # Status
+                                with ui.column().classes('w-32'):
+                                    ui.label(status).classes(f'px-2 py-1 rounded-full text-xs font-medium text-{status_color}-800 bg-{status_color}-100 text-center')
+                                # Last Updated
+                                ui.label(last_updated).classes('w-48 text-sm text-gray-600')
+                                # Actions
+                                with ui.row().classes('w-32 space-x-2'):
+                                    if submission:
+                                        ui.button('View', on_click=lambda p=profile: ui.navigate.to(f'/program_admin/{program_id}/profiles/{p["_id"]}')) \
+                                            .props('flat color=teal size=sm').classes('text-xs')
+                                        ui.button('Edit', on_click=lambda p=profile: ui.navigate.to(f'/program_admin/{program_id}/profiles/{p["_id"]}')) \
+                                            .props('outline color=teal size=sm').classes('text-xs')
+                                    else:
+                                        ui.button('Fill', on_click=lambda p=profile: ui.navigate.to(f'/program_admin/{program_id}/profiles/{p["_id"]}')) \
+                                            .props('flat color=teal size=sm').classes('text-xs')
+
+def render_editable_draft(draft_data, program_id, criteria_id):
+    """Render an editable table for draft data with improved UI/UX"""
+    if not draft_data or 'data' not in draft_data or not draft_data['data']:
+        ui.notify('No data available in this draft', color='warning')
+        return
+    
+    import pandas as pd
+    from copy import deepcopy
+    
+    # Create a deep copy of the data to avoid modifying the original
+    data = deepcopy(draft_data['data'])
+    df = pd.DataFrame(data)
+    
+    # Create a container for the table and buttons
+    with ui.column().classes('w-full bg-white p-6 rounded-lg shadow'):
+        # Header with draft info and action buttons
+        with ui.row().classes('w-full justify-between items-start mb-6'):
+            with ui.column():
+                ui.label(f'Draft: {draft_data.get("name", "Unnamed Draft")}').classes('text-xl font-semibold')
+                if 'updated_at' in draft_data and draft_data['updated_at']:
+                    last_updated = draft_data['updated_at'].strftime('%b %d, %Y %I:%M %p')
+                    ui.label(f'Last updated: {last_updated}').classes('text-sm text-gray-500')
+            
+            # Action buttons
+            with ui.row().classes('gap-3'):
+                save_btn = ui.button('Save Draft', icon='save', color='primary').classes('min-w-[120px]')
+                submit_btn = ui.button('Submit', icon='send', color='positive').classes('min-w-[120px]')
+        
+        # Table container
+        table_container = ui.column().classes('w-full overflow-x-auto')
+        
+        # Function to save draft
+        async def save_draft():
+            try:
+                # Show loading state
+                with ui.dialog() as dialog, ui.card():
+                    ui.spinner('dots')
+                    ui.label('Saving draft...')
+                dialog.open()
+                
+                # Get updated data from the table
+                updated_data = df.replace({pd.NA: None}).to_dict('records')
+                
+                # Update the draft in the database
+                result = criteria_submissions_col.update_one(
+                    {'_id': draft_data['_id']},
+                    {'$set': {
+                        'data': updated_data,
+                        'updated_at': datetime.utcnow()
+                    }}
+                )
+                
+                dialog.close()
+                if result.modified_count > 0:
+                    ui.notify('Draft saved successfully', color='positive')
+                    # Update the UI to show the last updated time
+                    ui.navigate.to(f'/program_admin/{program_id}/submissions')
+                else:
+                    ui.notify('No changes to save', color='info')
+                    
+            except Exception as e:
+                dialog.close()
+                ui.notify(f'Error saving draft: {str(e)}', color='negative')
+        
+        # Function to submit the draft
+        async def submit_draft():
+            try:
+                # Show confirmation dialog
+                with ui.dialog() as dialog, ui.card():
+                    ui.label('Are you sure you want to submit this draft?')
+                    with ui.row():
+                        ui.button('Cancel', on_click=dialog.close)
+                        ui.button('Submit', on_click=lambda: dialog.submit('submit'), color='positive')
+                
+                result = await dialog
+                if result != 'submit':
+                    return
+                
+                # Show loading state
+                with ui.dialog() as loading_dialog, ui.card():
+                    ui.spinner('dots')
+                    ui.label('Submitting...')
+                loading_dialog.open()
+                
+                # Update status to submitted
+                result = criteria_submissions_col.update_one(
+                    {'_id': draft_data['_id']},
+                    {'$set': {
+                        'status': 'submitted',
+                        'submitted_at': datetime.utcnow(),
+                        'updated_at': datetime.utcnow()
+                    }}
+                )
+                
+                loading_dialog.close()
+                if result.modified_count > 0:
+                    ui.notify('Submission successful!', color='positive')
+                    # Refresh the page to show updated status
+                    ui.navigate.to(f'/program_admin/{program_id}/submissions')
+                else:
+                    ui.notify('No changes to submit', color='info')
+                    
+            except Exception as e:
+                if 'loading_dialog' in locals():
+                    loading_dialog.close()
+                ui.notify(f'Error submitting: {str(e)}', color='negative')
+        
+        # Set up button click handlers with async/await
+        save_btn.on('click', save_draft)
+        submit_btn.on('click', submit_draft)
+        
+        # Function to render the table
+        def render_table():
+            table_container.clear()
+            with table_container:
+                # Create a card with shadow and rounded corners for the table
+                with ui.card().classes('w-full overflow-hidden border'):
+                    # Table header with sticky positioning
+                    with ui.element('thead').classes('bg-gray-50 sticky top-0 z-10'):
+                        with ui.row().classes('w-full bg-gray-50 border-b'):
+                            for col in df.columns:
+                                ui.label(str(col)).classes('p-3 text-sm font-medium text-gray-700')
+                            ui.label('Actions').classes('p-3 text-sm font-medium text-gray-700')
+                    
+                    # Table body
+                    with ui.element('div').classes('divide-y divide-gray-200'):
+                        for idx, row in df.iterrows():
+                            with ui.row().classes('w-full hover:bg-gray-50 transition-colors'):
+                                for col in df.columns:
+                                    # Create editable input for each cell
+                                    cell_value = '' if pd.isna(row[col]) else str(row[col])
+                                    with ui.input(value=cell_value).classes('flex-1 border-0 focus:ring-1 focus:ring-primary-500 m-1'):
+                                        def update_cell(value, r=idx, c=col):
+                                            df.at[r, c] = value if value != '' else None
+                                        ui.on('change', lambda e, c=col, r=idx: update_cell(e.args, r, c))
+                                
+                                # Delete button for the row
+                                with ui.button(icon='delete', color='red').classes('m-1').props('flat size=sm'):
+                                    # Use a list to store the row index and modify it in the callback
+                                    row_idx = [idx]
+                                    def delete_row():
+                                        # Get the current index of the row to delete
+                                        current_idx = row_idx[0]
+                                        if current_idx in df.index:
+                                            df.drop(index=current_idx, inplace=True)
+                                            df.reset_index(drop=True, inplace=True)
+                                            render_table()
+                                    ui.on('click', delete_row)
+        
+        # Function to add a new row
+        def add_row():
+            new_row = {col: None for col in df.columns}
+            df.loc[len(df)] = new_row
+            render_table()
+        
+        # Initial table render
+        render_table()
+        
+        # Add row button
+        with ui.row().classes('w-full justify-end mt-4'):
+            ui.button('Add Row', icon='add', on_click=add_row).classes('bg-green-500 text-white hover:bg-green-600')
+
+@ui.page('/program_admin/{program_id}/submissions')
+def program_admin_submissions_page(program_id: str):
+    """Program admin page to view submissions and drafts with improved UI"""
+    from bson import ObjectId
+    from datetime import datetime, timedelta
+    
+    # Get current user from session
+    user = app.storage.user.get('current_user', {}) if hasattr(app.storage, 'user') else {}
     
     # Check authentication
     if not check_auth():
-        ui.notify('Please log in first', color='negative')
         ui.navigate.to('/')
         return
     
-    from bson import ObjectId
-    
-    # Get department details
-    department = schools_col.find_one({'_id': ObjectId(department_id), 'type': 'department'})
-    if not department:
-        ui.notify('Department not found', color='negative')
-        ui.navigate.to('/')
+    # Get program data
+    program = programs_col.find_one({'_id': ObjectId(program_id)})
+    if not program:
+        ui.notify('Program not found', color='negative')
+        ui.navigate.to('/dashboard')
         return
     
-    # Get institution details
-    institution = institutions_col.find_one({'_id': ObjectId(department['institution_id'])})
-    main_color = institution.get('theme_color', 'rgb(154, 44, 84)') if institution else 'rgb(154, 44, 84)'
+    # Get institution data
+    institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
     
-    def content(inst, main_color):
-        ui.label(f'Department Admin Dashboard').classes('fade-in').style(
-            f'font-size: 2rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
-        )
-        ui.label(f'Department: {department.get("name", "Unknown")}').style(
-            'font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 2rem;'
-        )
+    # Get all submissions for this program
+    criteria_submissions = []
+    profile_submissions = []
+    
+    try:
+        # Convert program_id to ObjectId if it's a string
+        program_id_obj = ObjectId(program_id) if isinstance(program_id, str) else program_id
         
-        # Only show criteria and extended profiles
-        with ui.row().style('width: 100%; gap: 2rem;'):
-            # Criteria Section
-            with ui.card().classes('beautiful-card').style('flex: 1; padding: 2rem;'):
-                ui.label('📊 Criteria Management').style(
+        # Get criteria submissions including drafts
+        criteria_submissions = list(criteria_submissions_col.find({
+            '$or': [
+                {'program_id': program_id},
+                {'program_id': program_id_obj}
+            ],
+            'status': {'$in': ['draft', 'submitted']}
+        }).sort('updated_at', -1))
+        
+        # Get profile submissions including drafts
+        profile_submissions = list(db['extended_profile_submissions'].find({
+            '$or': [
+                {'program_id': program_id},
+                {'program_id': program_id_obj}
+            ],
+            'status': {'$in': ['draft', 'submitted']}
+        }).sort('updated_at', -1))
+        
+    except Exception as e:
+        print(f"Error fetching submissions: {str(e)}")
+        ui.notify(f'Error loading submissions: {str(e)}', color='negative')
+    
+    # Apply global styles
+    add_beautiful_global_styles()
+    
+    with ui.column().classes('w-full min-h-screen bg-gray-50'):
+        # Sidebar
+        program_admin_sidebar(program_id, 'submissions')
+        
+        # Main content area with left margin for sidebar
+        with ui.column().classes('ml-64 p-8 bg-gray-50 min-h-screen'):
+            # Header
+            with ui.row().classes('w-full justify-between items-center mb-8'):
+                with ui.column():
+                    ui.label('My Submissions').classes('text-2xl font-bold text-gray-800')
+                    ui.label(f'View and manage your submitted forms for {program.get("name", "Program")}') \
+                        .classes('text-gray-500 text-sm')
+                
+                with ui.button('New Submission', 
+                            on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                            icon='add') \
+                        .classes('bg-primary-500 text-white hover:bg-primary-600'):
+                    pass
+            
+            # Stats Cards
+            with ui.grid(columns=3).classes('w-full gap-6 mb-8'):
+                # Total Submissions
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('send', size='2rem', color='indigo-600').classes('p-2 bg-indigo-50 rounded-lg mb-3')
+                        ui.label('Total Submissions').classes('text-sm font-medium text-gray-500')
+                        ui.label(str(len([s for s in criteria_submissions if s.get('status') == 'submitted']))).classes('text-2xl font-bold text-gray-800')
+                
+                # Drafts
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('drafts', size='2rem', color='yellow-600').classes('p-2 bg-yellow-50 rounded-lg mb-3')
+                        ui.label('Drafts').classes('text-sm font-medium text-gray-500')
+                        ui.label(str(len([s for s in criteria_submissions if s.get('status') == 'draft']))).classes('text-2xl font-bold text-gray-800')
+                
+                # Recent Activity
+                with ui.card().classes('shadow-sm hover:shadow-md transition-all border border-gray-100'):
+                    with ui.column().classes('p-5'):
+                        ui.icon('update', size='2rem', color='green-600').classes('p-2 bg-green-50 rounded-lg mb-3')
+                        ui.label('Last Updated').classes('text-sm font-medium text-gray-500')
+                        last_updated = max(
+                            [s.get('updated_at', datetime.min) for s in criteria_submissions + profile_submissions],
+                            default=datetime.utcnow()
+                        )
+                        ui.label(last_updated.strftime('%b %d, %Y %I:%M %p') if last_updated != datetime.min else 'Never').classes('text-sm font-medium text-gray-800')
+            
+            # Drafts Section
+            with ui.card().classes('w-full mb-8'):
+                with ui.column().classes('w-full'):
+                    ui.label('Drafts').classes('text-xl font-semibold mb-4')
+                    
+                    all_drafts = [s for s in criteria_submissions + profile_submissions if s.get('status') == 'draft']
+                    
+                    if not all_drafts:
+                        ui.label('No drafts found').classes('text-gray-500 italic')
+                    else:
+                        for draft in all_drafts:
+                            draft_type = 'Criteria' if 'criteria_id' in draft else 'Extended Profile'
+                            draft_name = draft.get('name', 'Unnamed')
+                            updated_time = draft.get('updated_at', '').strftime('%b %d, %Y %I:%M %p') if draft.get('updated_at') else 'Unknown'
+                            
+                            with ui.expansion(f"Draft: {draft_name} ({draft_type}) - {updated_time}", 
+                                           icon='draft').classes('w-full mb-2'):
+                                with ui.column().classes('w-full p-4'):
+                                    # Show draft data
+                                    if 'data' in draft and 'table_data' in draft['data']:
+                                        table_data = draft['data']['table_data']
+                                        if table_data and len(table_data) > 0:
+                                            # Create a simple table to show the data
+                                            headers = list(table_data[0].keys()) if table_data else []
+                                            with ui.table(columns=headers, rows=table_data, row_key='id').classes('w-full mb-4'):
+                                                pass
+                                            
+                                            # Show data summary
+                                            ui.label(f'Data rows: {len(table_data)}').classes('text-sm text-gray-600 mb-2')
+                                        else:
+                                            ui.label('No data in this draft').classes('text-gray-500 italic')
+                                    else:
+                                        ui.label('No data in this draft').classes('text-gray-500 italic')
+                                    
+                                    # Action buttons for drafts
+                                    with ui.row().classes('w-full gap-2 mt-4'):
+                                        if draft_type == 'Criteria':
+                                            ui.button('Edit Draft', 
+                                                    on_click=lambda d=draft: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{d.get("criteria_id")}'),
+                                                    icon='edit',
+                                                    color='primary')
+                                        else:
+                                            ui.button('Edit Draft', 
+                                                    on_click=lambda d=draft: ui.navigate.to(f'/program_admin/{program_id}/profiles/{d.get("profile_id")}'),
+                                                    icon='edit',
+                                                    color='primary')
+                                        
+                                        ui.button('Submit Draft', 
+                                                on_click=lambda d=draft: submit_draft(d, program_id),
+                                                icon='send',
+                                                color='green')
+                                        
+                                        ui.button('Delete Draft', 
+                                                on_click=lambda d=draft: delete_draft(d, program_id),
+                                                icon='delete',
+                                                color='red')
+            
+            # Submissions Section
+            with ui.card().classes('w-full'):
+                with ui.column().classes('w-full'):
+                    ui.label('Submissions').classes('text-xl font-semibold mb-4')
+                    
+                    all_submissions = [s for s in criteria_submissions + profile_submissions if s.get('status') == 'submitted']
+                    
+                    if not all_submissions:
+                        ui.label('No submissions found').classes('text-gray-500 italic')
+                    else:
+                        # Create submissions data
+                        submissions_data = []
+                        for submission in all_submissions:
+                            submission_type = 'Criteria' if 'criteria_id' in submission else 'Extended Profile'
+                            submission_name = submission.get('name', 'Unnamed')
+                            submitted_time = submission.get('submitted_at', '').strftime('%b %d, %Y %I:%M %p') if submission.get('submitted_at') else 'N/A'
+                            
+                            # Create row data
+                            row_data = {
+                                'name': submission_name,
+                                'type': f'{submission_type} Submission',
+                                'status': 'Submitted',
+                                'submitted_at': submitted_time,
+                                'actions': 'View | Edit | Download'
+                            }
+                            submissions_data.append(row_data)
+                        
+                        # Display submissions in a simple table
+                        with ui.table(columns=[
+                            {'name': 'name', 'label': 'Name', 'field': 'name'},
+                            {'name': 'type', 'label': 'Type', 'field': 'type'},
+                            {'name': 'status', 'label': 'Status', 'field': 'status'},
+                            {'name': 'submitted_at', 'label': 'Submitted At', 'field': 'submitted_at'},
+                            {'name': 'actions', 'label': 'Actions', 'field': 'actions'}
+                        ], rows=submissions_data).classes('w-full'):
+                            pass
+                        
+                        # Add action buttons below the table
+                        for i, submission in enumerate(all_submissions):
+                            with ui.row().classes('w-full gap-2 mt-2 p-2 bg-gray-50 rounded'):
+                                ui.label(f"{i+1}. {submission.get('name', 'Unnamed')}").classes('flex-1')
+                                
+                                ui.button('View', 
+                                        on_click=lambda s=submission: view_submission(s, program_id),
+                                        icon='visibility',
+                                        color='primary',
+                                        size='sm')
+                                
+                                ui.button('Edit', 
+                                        on_click=lambda s=submission: edit_submitted_submission(s, program_id),
+                                        icon='edit',
+                                        color='warning',
+                                        size='sm')
+                                
+                                ui.button('Download', 
+                                        on_click=lambda s=submission: download_submission(s),
+                                        icon='download',
+                                        color='teal',
+                                        size='sm')
+            
+            # Empty state for no submissions
+            if not any(s.get('status') == 'submitted' for s in criteria_submissions) and \
+               not any(s.get('status') == 'draft' for s in criteria_submissions):
+                with ui.card().classes('w-full p-8 text-center'):
+                    ui.icon('inbox', size='3rem', color='gray-300').classes('mx-auto mb-4')
+                    ui.label('No submissions yet').classes('text-xl font-medium text-gray-700 mb-2')
+                    ui.label('Get started by creating a new submission').classes('text-gray-500')
+                    ui.button('New Submission', 
+                             on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                                     color='primary').classes('mt-4')
+            
+            # Add New Profile Button (if admin)
+            if user.get('role') == 'admin':
+                with ui.row().classes('mt-4'):
+                    ui.button('Add New Profile', on_click=lambda: ui.navigate.to(f'/institutions/{institution["_id"]}/profiles/new')) \
+                        .props('flat color=teal icon=person_add')
+        # Department Stats Section
+        with ui.card().classes('mt-6').style('width: 100%;'):
+            ui.label('📊 Department Statistics').style(
                     f'font-size: 1.5rem; font-weight: bold; color: {main_color}; margin-bottom: 1.5rem;'
                 )
                 
-                # Get criteria for this department
-                dept_criterias = list(criterias_col.find({
-                    'institution_id': department['institution_id'],
-                    'scope_type': 'department_based'
-                }))
+            # Get department profiles for the program
+            dept_profiles = list(extended_profiles_col.find({
+                'institution_id': str(program['institution_id']),
+                'department_id': program.get('department_id')
+            })) if program.get('department_id') else []
+            
+            # Get department criterias for the program
+            dept_criterias = list(criterias_col.find({
+                'institution_id': str(program['institution_id']),
+                'scope_type': 'department_based',
+                'department_id': program.get('department_id')
+            }))
+            
+            # Get total number of criteria for progress calculation
+            total_criteria = len(dept_criterias) if dept_criterias else 0
+            total_profiles = len(dept_profiles) if dept_profiles else 0
+            
+            submitted_criteria = 0
+            in_progress_criteria = 0
+            
+            submitted_profiles = 0
+            in_progress_profiles = 0
+            
+            # Count criteria statuses
+            if dept_criterias:
+                for criteria in dept_criterias:
+                    submission = criteria_submissions_col.find_one({
+                        'criteria_id': str(criteria['_id']),
+                        'department_id': department_id,
+                        'program_id': program_id
+                    })
+                    if submission:
+                        if submission.get('status') == 'submitted':
+                            submitted_criteria += 1
+                        elif submission.get('status') in ['in_progress', 'draft']:
+                            in_progress_criteria += 1
+            
+            # Count profile statuses
+            if dept_profiles:
+                for profile in dept_profiles:
+                    submission = extended_profile_submissions_col.find_one({
+                        'profile_id': str(profile['_id']),
+                        'department_id': department_id,
+                        'program_id': program_id
+                    })
+                    
+                    if submission:
+                        if submission.get('status') == 'submitted':
+                            submitted_profiles += 1
+                        elif submission.get('status') in ['in_progress', 'draft']:
+                            in_progress_profiles += 1
+            
+            # Display stats in a grid
+            with ui.grid(columns=4).classes('w-full gap-4'):
+                # Criteria Stats
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('📋 Total Criteria').classes('text-gray-600 text-sm mb-2')
+                    ui.label(str(total_criteria)).classes('text-2xl font-bold')
                 
-                if dept_criterias:
-                    for criteria in dept_criterias:
-                        with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; padding: 1rem; margin-bottom: 1rem; border-radius: 8px;'):
-                            ui.label(f"📋 {criteria.get('name', 'Unnamed')}").style(
-                                'font-size: 1.1rem; font-weight: bold; color: var(--text-primary); margin-bottom: 0.5rem;'
-                            )
-                            
-                            # Fix deadline display - check if deadline exists and format properly
-                            deadline = criteria.get('deadline')
-                            if deadline:
-                                try:
-                                    if isinstance(deadline, str):
-                                        deadline_str = deadline
-                                    else:
-                                        deadline_str = deadline.strftime('%Y-%m-%d')
-                                    ui.label(f"Deadline: {deadline_str}").style(
-                                        'font-size: 0.9rem; color: var(--warning-color); margin-bottom: 0.5rem;'
-                                    )
-                                except:
-                                    ui.label("Deadline: Invalid date format").style(
-                                        'font-size: 0.9rem; color: var(--error-color); margin-bottom: 0.5rem;'
-                                    )
-                            else:
-                                ui.label("Deadline: No deadline set").style(
-                                    'font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;'
-                                )
-                            
-                            # Fill criteria button
-                            ui.button('📝 Fill Criteria', on_click=lambda c_id=str(criteria['_id']): ui.navigate.to(f'/department_admin/{department_id}/fill_criteria/{c_id}')).style(
-                                f'background: {main_color}; color: white; padding: 0.5rem 1rem; border-radius: 6px; border: none; font-weight: 500;'
-                            )
-                else:
-                    ui.label('No criteria available for this department.').style(
-                        'color: var(--text-secondary); font-style: italic; text-align: center; padding: 2rem;'
-                    )
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('✅ Submitted').classes('text-green-600 text-sm mb-2')
+                    ui.label(f"{submitted_criteria} of {total_criteria}").classes('text-2xl font-bold')
+                
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('⏳ In Progress').classes('text-blue-600 text-sm mb-2')
+                    ui.label(str(in_progress_criteria)).classes('text-2xl font-bold')
+                
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('📊 Completion').classes('text-purple-600 text-sm mb-2')
+                    completion = int((submitted_criteria / total_criteria) * 100) if total_criteria > 0 else 0
+                    ui.label(f"{completion}%").classes('text-2xl font-bold')
+                    
+                    # Progress bar
+                    with ui.linear_progress(value=completion/100, show_value=False).classes('w-full h-2 mt-2') as progress:
+                        progress.style(f'--q-linear-progress-track-color: #e9ecef; --q-linear-progress-color: {main_color};')
+            
+            # Add a separator
+            ui.separator().classes('my-6')
+            
+            # Profiles Stats
+            with ui.grid(columns=4).classes('w-full gap-4'):
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('👥 Total Profiles').classes('text-gray-600 text-sm mb-2')
+                    ui.label(str(total_profiles)).classes('text-2xl font-bold')
+                
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('✅ Submitted').classes('text-green-600 text-sm mb-2')
+                    ui.label(f"{submitted_profiles} of {total_profiles}").classes('text-2xl font-bold')
+                
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('⏳ In Progress').classes('text-blue-600 text-sm mb-2')
+                    ui.label(str(in_progress_profiles)).classes('text-2xl font-bold')
+                
+                with ui.card().classes('p-4 text-center'):
+                    ui.label('📊 Completion').classes('text-purple-600 text-sm mb-2')
+                    completion = int((submitted_profiles / total_profiles) * 100) if total_profiles > 0 else 0
+                    ui.label(f"{completion}%").classes('text-2xl font-bold')
+                    
+                    # Progress bar
+                    with ui.linear_progress(value=completion/100, show_value=False).classes('w-full h-2 mt-2') as progress:
+                        progress.style(f'--q-linear-progress-track-color: #e9ecef; --q-linear-progress-color: {main_color};')
             
             # Extended Profiles Section
             with ui.card().classes('beautiful-card').style('flex: 1; padding: 2rem;'):
@@ -4772,10 +5539,11 @@ def department_admin_dashboard(department_id: str):
                     f'font-size: 1.5rem; font-weight: bold; color: {main_color}; margin-bottom: 1.5rem;'
                 )
                 
-                # Get extended profiles for this department
+                # Get extended profiles for this program's department
                 dept_profiles = list(extended_profiles_col.find({
-                    'institution_id': department['institution_id'],
-                    'scope_type': 'department_based'
+                    'institution_id': str(program['institution_id']),
+                    'scope_type': 'department_based',
+                    'department_id': program.get('department_id')
                 }))
                 
                 if dept_profiles:
@@ -4818,10 +5586,10 @@ def department_admin_dashboard(department_id: str):
     with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
         # Simple sidebar
         with ui.column().style('min-width: 250px; background: var(--surface); border-right: 2px solid var(--border); height: 100vh; padding: 1.5rem;'):
-            ui.label(f'🏢 {department.get("name", "Department")}').style(
+            ui.label(f'🏢 {program.get("name", "Program")}').style(
                 f'font-size: 1.3rem; font-weight: bold; color: {main_color}; margin-bottom: 0.5rem;'
             )
-            ui.label('Department Admin').style('font-size: 1rem; color: var(--text-secondary); margin-bottom: 2rem;')
+            ui.label('Program Admin').style('font-size: 1rem; color: var(--text-secondary); margin-bottom: 2rem;')
             
             ui.separator().style('margin: 1rem 0; background: var(--border);')
             
@@ -4849,14 +5617,744 @@ def department_admin_dashboard(department_id: str):
         
         # Main content
         with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content(institution, main_color)
+            # Main content will be rendered here by other UI components
+            pass
+
+# Profile View Page
+@ui.page('/program_admin/{program_id}/profiles/{profile_id}')
+async def program_admin_profile_page(program_id: str, profile_id: str, draft: str = None, request: FastAPIRequest = None):
+    """Program admin page to view and edit profile data"""
+    global current_user
+    
+    # Get user from session
+    current_user = app.storage.user.get('user')
+    if not current_user or not current_user.get('email'):
+        ui.notify('Please log in first', color='negative')
+        ui.navigate.to('/')
+        return
+    
+    # Verify user is program admin for this program
+    user = users_col.find_one({'email': current_user['email']})
+    if not user or user.get('role') != 'Program Admin' or user.get('program_id') != program_id:
+        ui.notify('Access denied. You can only access profiles for your assigned program.', color='negative')
+        ui.navigate.to('/')
+        return
+    
+    # Get program and profile details
+    program = programs_col.find_one({'_id': ObjectId(program_id)})
+    if not program:
+        ui.notify('Program not found', color='negative')
+        ui.navigate.to('/dashboard')
+        return
+    
+    profile = extended_profiles_col.find_one({'_id': ObjectId(profile_id)})
+    if not profile:
+        ui.notify('Profile not found', color='negative')
+        ui.navigate.to(f'/program_admin/{program_id}/criteria')
+        return
+    
+    # Get institution for theming
+    institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
+    main_color = institution.get('theme_color', '#1a73e8') if institution else '#1a73e8'
+    
+    # Check for existing draft or submission
+    current_data = None
+    if draft:
+        current_data = criteria_submissions_col.find_one({
+            '_id': ObjectId(draft),
+            'profile_id': profile_id,
+            'status': 'draft'
+        })
+    else:
+        # Check for existing submission
+        current_data = criteria_submissions_col.find_one({
+            'profile_id': profile_id,
+            'program_id': program_id,
+            'status': 'draft'
+        })
+    
+    # Form data
+    form_data = {}
+    if current_data and 'data' in current_data:
+        form_data = current_data['data']
+    
+    # Main layout
+    with ui.column().classes('w-full min-h-screen bg-gray-50'):
+        # Sticky header with back button and title
+        with ui.row().classes('w-full bg-white shadow-sm p-4 items-center sticky top-0 z-20'):
+            ui.button(icon='arrow_back',
+                    on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                    color='primary').props('flat dense').classes('mr-2')
+            
+            with ui.column().classes('flex-1'):
+                ui.label(f'Profile: {profile.get("name", "")}').classes('text-2xl font-bold text-gray-800')
+                if current_data and current_data.get('status') == 'draft':
+                    ui.label('Draft').classes('text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full w-fit')
+            
+            with ui.row().classes('ml-auto gap-2'):
+                if current_data and current_data.get('status') == 'draft':
+                    ui.button('View All Drafts',
+                            on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria?tab=drafts'),
+                            icon='drafts',
+                            color='blue',
+                            outline=True)
+        
+        # Initialize global variables
+        global table_container, current_profile
+        current_profile = profile
+        
+        # Main content area
+        with ui.column().classes('w-full max-w-6xl mx-auto p-6 space-y-6') as main_container:
+            # Initialize table container
+            table_container = ui.column().classes('w-full')
+            # Profile Information Section
+            with ui.card().classes('w-full'):
+                with ui.column().classes('w-full space-y-4'):
+                    ui.label('Profile Information').classes('text-xl font-semibold')
+                    
+                    # Display profile name and description
+                    with ui.card().classes('w-full bg-gray-50'):
+                        with ui.column().classes('w-full space-y-2'):
+                            ui.label('Profile Name').classes('text-sm font-medium text-gray-500')
+                            ui.label(profile.get('name', '')).classes('text-lg font-medium')
+                            
+                            if profile.get('description'):
+                                ui.label('Description').classes('mt-4 text-sm font-medium text-gray-500')
+                                ui.label(profile.get('description', '')).classes('text-md')
+            
+            # Data Entry Section
+            with ui.card().classes('w-full'):
+                with ui.column().classes('w-full space-y-4'):
+                    ui.label('Data Entry').classes('text-xl font-semibold')
+                    
+                    # Display headers for reference
+                    if 'headers' in profile and profile['headers']:
+                        with ui.expansion('View Headers', icon='list').classes('w-full'):
+                            with ui.row().classes('flex flex-wrap gap-2 p-2'):
+                                for i, header in enumerate(profile['headers']):
+                                    ui.chip(header, color='primary', icon='label')
+                    
+                    # Entry Method Selection
+                    with ui.card().classes('w-full bg-blue-50'):
+                        with ui.row().classes('items-center w-full'):
+                            ui.label('Select Entry Method:').classes('font-medium')
+                            global entry_method
+                            entry_method = ui.select(
+                                options=['Manual Entry', 'Upload File'],
+                                value='Manual Entry'
+                            ).classes('ml-4 min-w-[200px]')
+                    
+                    # File Upload Section (initially hidden)
+                    upload_container = ui.column().classes('w-full hidden')
+                    
+                    # Manual Entry Section (initially visible)
+                    manual_entry_container = ui.column().classes('w-full')
+                    
+                    # Table for manual entry - ALWAYS VISIBLE when there's data
+                    table_container = ui.column().classes('w-full overflow-x-auto')
+                    
+                    # Function to update the table based on entry method
+                    global update_entry_ui
+                    def update_entry_ui():
+                        if entry_method.value == 'Upload File':
+                            upload_container.classes(remove='hidden')
+                            manual_entry_container.classes('hidden')
+                            # Table is always visible when there's data
+                            if entry_data and len(entry_data) > 0:
+                                table_container.classes(remove='hidden')
+                        else:
+                            upload_container.classes('hidden')
+                            manual_entry_container.classes(remove='hidden')
+                            table_container.classes(remove='hidden')
+                            render_manual_entry_table()
+                    
+                    entry_method.on('update:model-value', lambda: update_entry_ui())
+                    
+                    # File Upload Component
+                    with upload_container:
+                        with ui.card().classes('w-full p-4'):
+                            ui.label('Upload File').classes('text-lg font-medium mb-4')
+                            upload = ui.upload(
+                                label='Choose a file (CSV, Excel)',
+                                multiple=False,
+                                on_upload=handle_file_upload,
+                                auto_upload=True
+                            ).classes('w-full')
+                            
+                            with upload:
+                                ui.label('Drag and drop file here or click to select')
+                            
+                            # Add a status label
+                            status_label = ui.label('Ready to upload file...').classes('mt-2 text-gray-600')
+                    
+                    # Manual Entry Controls
+                    with manual_entry_container:
+                        with ui.row().classes('w-full justify-between items-center'):
+                            ui.label('Manual Data Entry').classes('text-lg font-medium')
+                            ui.button('Add Row', 
+                                    icon='add', 
+                                    on_click=lambda: add_table_row(),
+                                    color='primary')
+                    
+                    # Table for displaying and editing data - ALWAYS VISIBLE
+                    with table_container:
+                        print(f"DEBUG: Initializing table container")
+                        print(f"DEBUG: current_profile: {current_profile}")
+                        # Initialize the table with current profile headers
+                        if current_profile and 'headers' in current_profile:
+                            headers = current_profile['headers']
+                            print(f"DEBUG: Found headers: {headers}")
+                            if headers:
+                                # Create initial empty row
+                                global entry_data
+                                entry_data = [{h: '' for h in headers}]
+                                print(f"DEBUG: Created initial entry_data: {entry_data}")
+                                render_manual_entry_table()
+                            else:
+                                print("DEBUG: Headers list is empty")
+                                ui.label('No headers defined for this profile. Please contact your administrator.').classes('text-red-600 text-center')
+                        else:
+                            print("DEBUG: No current_profile or no headers")
+                            ui.label('Profile information not found. Please refresh the page.').classes('text-red-600 text-center')
+            
+            # Document Upload Section
+            with ui.card().classes('w-full'):
+                ui.label('Supporting Documents').classes('text-xl font-semibold mb-4')
+                
+                # File upload component
+                with ui.upload(
+                    label='Upload Supporting Documents',
+                    multiple=True,
+                    on_upload=lambda e: handle_document_upload(e, form_data)
+                ).classes('w-full') as upload:
+                    ui.label('Drag and drop files here or click to select')
+                
+                # Display uploaded files
+                if 'documents' in form_data and form_data['documents']:
+                    with ui.row().classes('w-full flex-wrap gap-2'):
+                        for doc in form_data['documents']:
+                            with ui.card().classes('relative'):
+                                ui.icon('description').classes('text-2xl mb-1')
+                                ui.label(doc.get('name', 'Document')).classes('text-sm truncate')
+                                ui.button(
+                                    icon='delete',
+                                    on_click=lambda d=doc: remove_document(d, form_data),
+                                    color='red',
+                                    size='sm',
+                                    flat=True,
+                                    dense=True
+                                ).classes('absolute top-0 right-0')
+            
+            # Action buttons
+            with ui.row().classes('w-full justify-end gap-4 mt-6'):
+                ui.button('Cancel',
+                        on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                        color='gray')
+                
+                ui.button('Save as Draft',
+                        on_click=lambda: save_profile_draft(program_id, profile_id, form_data, False),
+                        icon='save',
+                        color='blue')
+                
+                ui.button('Submit',
+                        on_click=lambda: save_profile_draft(program_id, profile_id, form_data, True),
+                        icon='send',
+                        color='green')
+
+# Data storage for the table
+entry_data = []
+table_container = None  # Will be initialized in the page function
+current_profile = None  # Will store the current profile data
+
+def normalize_header(header, target_headers):
+    """Normalize header by matching with target headers case-insensitively"""
+    header_lower = header.strip().lower()
+    for target in target_headers:
+        if target.lower() == header_lower:
+            return target
+    return header  # Return original if no match found
+
+def render_manual_entry_table():
+    """Render or update the manual entry table"""
+    global entry_data, table_container, current_profile
+    
+    print(f"DEBUG: render_manual_entry_table called")
+    print(f"DEBUG: table_container exists: {table_container is not None}")
+    print(f"DEBUG: current_profile: {current_profile}")
+    
+    if not table_container:
+        print("DEBUG: No table container, returning")
+        return
+    
+    # Clear existing table content
+    table_container.clear()
+    
+    # Get headers from current profile
+    headers = current_profile.get('headers', []) if current_profile else []
+    print(f"DEBUG: Headers found: {headers}")
+    
+    if not headers:
+        print("DEBUG: No headers found")
+        with table_container:
+            ui.label('No headers defined for this profile. Please contact your administrator.').classes('text-red-600 text-center')
+        return
+    
+    # Ensure entry_data has at least one row
+    if not entry_data or not isinstance(entry_data, list) or len(entry_data) == 0:
+        entry_data = [{h: '' for h in headers}]
+        print(f"DEBUG: Created initial entry_data: {entry_data}")
+    
+    print(f"DEBUG: Creating table with {len(entry_data)} rows and {len(headers)} headers")
+    
+    # Create the table with proper structure
+    with table_container:
+        # Create a grid-like table for manual entry
+        with ui.card().classes('w-full p-4'):
+            ui.label('Data Entry Table').classes('text-lg font-medium mb-4')
+            
+            # Table headers
+            with ui.row().classes('w-full bg-gray-100 p-2 font-medium border-b'):
+                for header in headers:
+                    ui.label(header).classes('flex-1 text-center')
+                ui.label('Actions').classes('w-24 text-center')
+            
+            # Table rows
+            for row_idx, row_data in enumerate(entry_data):
+                with ui.row().classes('w-full p-2 border-b hover:bg-gray-50'):
+                    for header in headers:
+                        # Create input field for each cell
+                        input_field = ui.input(
+                            value=row_data.get(header, ''),
+                            on_change=lambda e, r=row_idx, h=header: update_cell_value(r, h, e.value)
+                        ).classes('flex-1 mx-1')
+                    # Delete button for this row
+                    ui.button(
+                        icon='delete',
+                        on_click=lambda r=row_idx: remove_table_row_by_index(r),
+                        color='red'
+                    ).classes('w-24')
+            
+            # Add row button
+            with ui.row().classes('w-full justify-center mt-4'):
+                ui.button(
+                    'Add New Row',
+                    on_click=lambda: add_table_row(),
+                    icon='add',
+                    color='primary'
+                )
+    
+    print("DEBUG: Table creation complete")
+
+def add_table_row():
+    """Add a new empty row to the table"""
+    global entry_data, current_profile
+    if not current_profile:
+        return
+    headers = current_profile.get('headers', []) or []
+    entry_data.append({h: '' for h in headers})
+    render_manual_entry_table()
+
+def update_cell_value(row_idx, header, value):
+    """Update a cell value in the entry_data"""
+    global entry_data
+    if 0 <= row_idx < len(entry_data):
+        entry_data[row_idx][header] = value
+        # Ensure table is visible when data exists
+        if table_container:
+            table_container.classes(remove='hidden')
+
+def remove_table_row_by_index(row_idx):
+    """Remove a specific row by index"""
+    global entry_data
+    if len(entry_data) > 1 and 0 <= row_idx < len(entry_data):
+        entry_data.pop(row_idx)
+        render_manual_entry_table()
+    elif len(entry_data) <= 1:
+        ui.notify('At least one row is required', color='warning')
+
+def remove_table_row(e):
+    """Remove a row from the table (legacy function)"""
+    global entry_data
+    if len(entry_data) > 1:  # Keep at least one row
+        # Remove the last row (simple approach)
+        entry_data.pop()
+        render_manual_entry_table()
+    else:
+        ui.notify('At least one row is required', color='warning')
+
+async def handle_file_upload(e: UploadEventArguments):
+    """Handle file upload and parse data"""
+    global entry_data, current_profile
+    
+    print("File upload triggered")  # Debug log
+    
+    if not hasattr(e, 'content') or not e.content:
+        ui.notify('No file selected', color='warning')
+        return
+    
+    # Get file content directly from the event
+    content = e.content
+    filename = getattr(e, 'name', 'uploaded_file')
+    print(f"Processing file: {filename}")  # Debug log
+    
+    try:
+        # Read content if it's a file-like object
+        if hasattr(content, 'read'):
+            content_bytes = content.read()
+            content.seek(0)  # Reset file pointer
+        else:
+            content_bytes = content
+        print(f"File read successfully, size: {len(content_bytes)} bytes")  # Debug log
+        import pandas as pd
+        from io import BytesIO
+        
+        # Read file based on type
+        if filename.lower().endswith('.csv'):
+            df = pd.read_csv(BytesIO(content_bytes))
+        elif filename.lower().endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(BytesIO(content_bytes))
+        else:
+            raise ValueError('Unsupported file format. Please upload a CSV or Excel file.')
+        
+        if df.empty:
+            ui.notify('The uploaded file is empty', color='warning')
+            return
+        
+        # Get target headers from current profile
+        target_headers = current_profile.get('headers', []) if current_profile else []
+        
+        # If no target headers, use the file headers
+        if not target_headers:
+            target_headers = list(df.columns)
+            if current_profile:
+                current_profile['headers'] = target_headers
+        
+        # Normalize headers to match target headers if they exist
+        if target_headers:
+            df.columns = [normalize_header(h, target_headers) for h in df.columns]
+        
+        # Convert to list of dicts
+        entry_data = df.to_dict('records')
+        
+        # Ensure all rows have all headers
+        for row in entry_data:
+            for header in target_headers:
+                if header not in row:
+                    row[header] = ''
+        
+        # Automatically switch to manual entry view and show the table
+        entry_method.value = 'Manual Entry'
+        
+        # Force the UI update to show manual entry view
+        update_entry_ui()
+        
+        # Ensure table container is visible
+        if table_container:
+            table_container.classes(remove='hidden')
+        
+        # Render the table with the new data immediately
+        render_manual_entry_table()
+        
+        ui.notify(f'Successfully loaded {len(entry_data)} rows from {filename}. Table is ready for editing!', color='positive')
+    except Exception as ex:
+        ui.notify(f'Error processing file: {str(ex)}', color='negative')
+        import traceback
+        print(traceback.format_exc())
+
+def handle_document_upload(e, form_data):
+    """Handle document upload and update form data"""
+    if 'documents' not in form_data:
+        form_data['documents'] = []
+    
+    for file in e.files:
+        form_data['documents'].append({
+            'name': file.name,
+            'type': file.type,
+            'size': file.size,
+            'content': file.read().decode('utf-8') if file.type.startswith('text/') else file.read()
+        })
+    
+    ui.notify(f'Uploaded {len(e.files)} files', color='positive')
+
+def remove_document(doc, form_data):
+    """Remove a document from the form data"""
+    if 'documents' in form_data and doc in form_data['documents']:
+        form_data['documents'].remove(doc)
+        ui.notify('Document removed', color='info')
+
+def submit_draft(draft, program_id):
+    """Submit a draft to change its status from draft to submitted"""
+    try:
+        # Show confirmation dialog
+        with ui.dialog() as dialog, ui.card():
+            ui.label('Confirm Submission').classes('text-lg font-semibold mb-4')
+            ui.label('Are you sure you want to submit this draft? This action cannot be undone.').classes('text-gray-600 mb-4')
+            
+            with ui.row().classes('w-full gap-2'):
+                ui.button('Cancel', on_click=dialog.close).classes('bg-gray-500 text-white')
+                ui.button('Submit', on_click=lambda: submit_draft_confirm(draft, program_id, dialog)).classes('bg-green-500 text-white')
+    
+    except Exception as e:
+        ui.notify(f'Error preparing submission: {str(e)}', color='negative')
+
+def submit_draft_confirm(draft, program_id, dialog):
+    """Actually submit the draft after confirmation"""
+    try:
+        # Update the draft status to submitted
+        if 'criteria_id' in draft:
+            # Criteria submission
+            criteria_submissions_col.update_one(
+                {'_id': draft['_id']},
+                {'$set': {
+                    'status': 'submitted',
+                    'submitted_at': datetime.now(timezone.utc),
+                    'updated_at': datetime.now(timezone.utc)
+                }}
+            )
+        else:
+            # Extended profile submission
+            extended_profile_submissions_col.update_one(
+                {'_id': draft['_id']},
+                {'$set': {
+                    'status': 'submitted',
+                    'submitted_at': datetime.now(timezone.utc),
+                    'updated_at': datetime.now(timezone.utc)
+                }}
+            )
+        
+        dialog.close()
+        ui.notify('Draft submitted successfully!', color='positive')
+        
+        # Refresh the page to show updated status
+        ui.navigate.to(f'/program_admin/{program_id}/submissions')
+        
+    except Exception as e:
+        ui.notify(f'Error submitting draft: {str(e)}', color='negative')
+
+def delete_draft(draft, program_id):
+    """Delete a draft after confirmation"""
+    try:
+        # Show confirmation dialog
+        with ui.dialog() as dialog, ui.card():
+            ui.label('Confirm Deletion').classes('text-lg font-semibold mb-4')
+            ui.label('Are you sure you want to delete this draft? This action cannot be undone.').classes('text-red-600 mb-4')
+            
+            with ui.row().classes('w-full gap-2'):
+                ui.button('Cancel', on_click=dialog.close).classes('bg-gray-500 text-white')
+                ui.button('Delete', on_click=lambda: delete_draft_confirm(draft, program_id, dialog)).classes('bg-red-500 text-white')
+    
+    except Exception as e:
+        ui.notify(f'Error preparing deletion: {str(e)}', color='negative')
+
+def delete_draft_confirm(draft, program_id, dialog):
+    """Actually delete the draft after confirmation"""
+    try:
+        # Delete the draft
+        if 'criteria_id' in draft:
+            # Criteria submission
+            criteria_submissions_col.delete_one({'_id': draft['_id']})
+        else:
+            # Extended profile submission
+            extended_profile_submissions_col.delete_one({'_id': draft['_id']})
+        
+        dialog.close()
+        ui.notify('Draft deleted successfully!', color='positive')
+        
+        # Refresh the page to show updated status
+        ui.navigate.to(f'/program_admin/{program_id}/submissions')
+        
+    except Exception as e:
+        ui.notify(f'Error deleting draft: {str(e)}', color='negative')
+
+def view_submission(submission, program_id):
+    """View a submitted submission"""
+    try:
+        submission_type = 'Criteria' if 'criteria_id' in submission else 'Extended Profile'
+        
+        with ui.dialog() as dialog, ui.card().classes('w-full max-w-4xl'):
+            ui.label(f'View {submission_type} Submission').classes('text-xl font-semibold mb-4')
+            
+            # Show submission details
+            with ui.column().classes('w-full'):
+                ui.label(f'Status: {submission.get("status", "Unknown")}').classes('text-lg mb-2')
+                ui.label(f'Submitted by: {submission.get("submitted_by", "Unknown")}').classes('mb-2')
+                ui.label(f'Submitted at: {submission.get("submitted_at", "").strftime("%Y-%m-%d %H:%M:%S") if submission.get("submitted_at") else "Unknown"}').classes('mb-4')
+                
+                # Show table data if available
+                if 'data' in submission and 'table_data' in submission['data']:
+                    table_data = submission['data']['table_data']
+                    if table_data and len(table_data) > 0:
+                        headers = list(table_data[0].keys()) if table_data else []
+                        with ui.table(columns=headers, rows=table_data, row_key='id').classes('w-full'):
+                            pass
+                    else:
+                        ui.label('No data available in this submission').classes('text-gray-500 italic')
+                else:
+                    ui.label('No data available in this submission').classes('text-gray-500 italic')
+            
+            with ui.row().classes('w-full justify-end mt-4'):
+                ui.button('Close', on_click=dialog.close).classes('bg-gray-500 text-white')
+    
+    except Exception as e:
+        ui.notify(f'Error viewing submission: {str(e)}', color='negative')
+
+def edit_submitted_submission(submission, program_id):
+    """Edit a submitted submission with confirmation"""
+    try:
+        submission_type = 'Criteria' if 'criteria_id' in submission else 'Extended Profile'
+        
+        with ui.dialog() as dialog, ui.card():
+            ui.label('Confirm Edit').classes('text-lg font-semibold mb-4')
+            ui.label(f'Are you sure you want to edit this {submission_type.lower()} submission?').classes('text-gray-600 mb-2')
+            ui.label('Editing will change the status back to draft.').classes('text-orange-600 mb-4')
+            
+            with ui.row().classes('w-full gap-2'):
+                ui.button('Cancel', on_click=dialog.close).classes('bg-gray-500 text-white')
+                ui.button('Edit', on_click=lambda: edit_submission_confirm(submission, program_id, dialog)).classes('bg-orange-500 text-white')
+    
+    except Exception as e:
+        ui.notify(f'Error preparing edit: {str(e)}', color='negative')
+
+def edit_submission_confirm(submission, program_id, dialog):
+    """Actually edit the submission after confirmation"""
+    try:
+        # Change status back to draft
+        if 'criteria_id' in submission:
+            # Criteria submission
+            criteria_submissions_col.update_one(
+                {'_id': submission['_id']},
+                {'$set': {
+                    'status': 'draft',
+                    'updated_at': datetime.now(timezone.utc)
+                }}
+            )
+        else:
+            # Extended profile submission
+            extended_profile_submissions_col.update_one(
+                {'_id': submission['_id']},
+                {'$set': {
+                    'status': 'draft',
+                    'updated_at': datetime.now(timezone.utc)
+                }}
+            )
+        
+        dialog.close()
+        ui.notify('Submission changed to draft. You can now edit it.', color='positive')
+        
+        # Refresh the page to show updated status
+        ui.navigate.to(f'/program_admin/{program_id}/submissions')
+        
+    except Exception as e:
+        ui.notify(f'Error editing submission: {str(e)}', color='negative')
+
+def download_submission(submission):
+    """Download submission data as CSV"""
+    try:
+        if 'data' in submission and 'table_data' in submission['data']:
+            table_data = submission['data']['table_data']
+            if table_data and len(table_data) > 0:
+                import pandas as pd
+                import io
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(table_data)
+                
+                # Create CSV content
+                csv_content = df.to_csv(index=False)
+                
+                # Create download link
+                ui.download(
+                    content=csv_content,
+                    filename=f"submission_{submission.get('_id', 'data')}.csv",
+                    label='Download CSV'
+                )
+                
+                ui.notify('Download started!', color='positive')
+            else:
+                ui.notify('No data available for download', color='warning')
+        else:
+            ui.notify('No data available for download', color='warning')
+            
+    except Exception as e:
+        ui.notify(f'Error downloading submission: {str(e)}', color='negative')
+
+def save_profile_draft(program_id: str, profile_id: str, data: Optional[Dict], is_submit: bool):
+    """Save profile data as draft or submit it"""
+    try:
+        # Get user from session
+        current_user = app.storage.user.get('user')
+        if not current_user or not current_user.get('email'):
+            ui.notify('Please log in first', color='negative')
+            ui.navigate.to('/')
+            return
+            
+        # Include the table data in the form data
+        global entry_data
+        if not data:
+            data = {}
+        if 'table_data' not in data:
+            data['table_data'] = []
+        data['table_data'] = entry_data
+        
+        # Prepare submission data
+        submission_data = {
+            'program_id': ObjectId(program_id),
+            'profile_id': ObjectId(profile_id),
+            'data': data,
+            'status': 'submitted' if is_submit else 'draft',
+            'submitted_by': current_user['email'],
+            'submitted_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc),
+            'created_at': datetime.now(timezone.utc),
+            'created_by': current_user['email']
+        }
+        
+        # Check for existing submission (both draft and submitted)
+        existing = extended_profile_submissions_col.find_one({
+            'profile_id': ObjectId(profile_id),
+            'program_id': ObjectId(program_id)
+        })
+        
+        if existing:
+            # Update existing submission
+            extended_profile_submissions_col.update_one(
+                {'_id': existing['_id']},
+                {'$set': submission_data}
+            )
+            submission_id = existing['_id']
+            ui.notify(f'Profile {"submitted" if is_submit else "draft"} updated successfully!', color='positive')
+        else:
+            # Create new submission
+            submission_id = extended_profile_submissions_col.insert_one(submission_data).inserted_id
+            ui.notify(f'Profile {"submitted" if is_submit else "draft"} created successfully!', color='positive')
+        
+        # Log the action
+        log_audit_action(
+            'Profile Submission' if is_submit else 'Profile Draft',
+            f'{"Submitted" if is_submit else "Saved as draft"} profile {profile_id} for program {program_id}',
+            entity_type='Extended Profile',
+            entity_id=str(submission_id)
+        )
+        
+        if is_submit:
+            ui.navigate.to(f'/program_admin/{program_id}/submissions')
+        else:
+            ui.navigate.to(f'/program_admin/{program_id}/profiles/{profile_id}')
+            
+    except Exception as e:
+        ui.notify(f'Error saving profile: {str(e)}', color='negative')
+        print(f'Error saving profile: {str(e)}')
+        import traceback
+        traceback.print_exc()
 
 # Program Admin Fill Criteria Page
 @ui.page('/program_admin/{program_id}/fill_criteria/{criteria_id}')
-def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
-    """Program admin page to fill criteria data"""
+async def program_admin_fill_criteria_page(program_id: str, criteria_id: str, request: FastAPIRequest = None):
+    """Program admin page to fill criteria data with file upload and manual entry options"""
     global current_user
     
+    # Get user from session
+    current_user = app.storage.user.get('user')
     if not current_user or not current_user.get('email'):
         ui.notify('Please log in first', color='negative')
         ui.navigate.to('/')
@@ -4870,23 +6368,482 @@ def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
         return
     
     from bson import ObjectId
+    import pandas as pd
     
-    # Get criteria details
-    criteria = criterias_col.find_one({'_id': ObjectId(criteria_id)})
+    # Get program and criteria details
+    program = programs_col.find_one({'_id': ObjectId(program_id)})
     if not program:
+        ui.notify('Program not found', color='negative')
+        ui.navigate.to('/dashboard')
         return
+        
+    criteria = criterias_col.find_one({'_id': ObjectId(criteria_id)})
+    if not criteria:
+        ui.notify('Criteria not found', color='negative')
+        ui.navigate.to(f'/program_admin/{program_id}/criteria')
+        return
+    
+    # Get criteria headers
+    headers = criteria.get('headers', [])
+    if not headers:
+        ui.notify('No headers defined for this criteria', color='warning')
+    
+    # Check for existing submission (prevent duplicate submissions)
+    existing_submission = criteria_submissions_col.find_one({
+        'criteria_id': criteria_id,
+        'program_id': program_id,
+        'status': 'submitted'
+    })
+    
+    if existing_submission and not request.query_params.get('edit'):
+        ui.notify('This criteria has already been submitted. You can only edit drafts.', color='warning')
+    
     institution = institutions_col.find_one({'_id': ObjectId(program['institution_id'])})
     main_color = institution.get('theme_color', 'rgb(154, 44, 84)') if institution else 'rgb(154, 44, 84)'
 
-    def content(inst, main_color):
-        # ...existing code for content...
-        pass
+    # Initialize data structures
+    df = pd.DataFrame()
+    data_rows = []
+    file_name = 'N/A'
+    upload_method = 'manual'  # 'manual' or 'file'
+    
+    # Load drafts or existing submission
+    drafts = list(criteria_submissions_col.find({
+        'criteria_id': criteria_id,
+        'program_id': program_id,
+        'status': 'draft'
+    }).sort('updated_at', -1))
+    
+    # Check if this is a draft or existing submission load
+    draft_id = request.query_params.get('draft') if request else None
+    submission_id = request.query_params.get('submission') if request else None
+    
+    current_data = None
+    if draft_id:
+        current_data = next((d for d in drafts if str(d['_id']) == draft_id), None)
+        if current_data:
+            ui.notify('Loaded draft data', color='positive')
+    elif submission_id or existing_submission:
+        current_data = existing_submission or criteria_submissions_col.find_one({
+            '_id': ObjectId(submission_id),
+            'criteria_id': criteria_id,
+            'program_id': program_id
+        })
+        if current_data:
+            ui.notify('Loaded existing submission', color='positive')
+            
+    # If we have existing data, prepare it for the form
+    if current_data and 'data' in current_data:
+        data_rows = current_data['data']
+        if 'file_name' in current_data:
+            file_name = current_data['file_name']
+            upload_method = 'file'
+    
+    # Show drafts list if not loading a specific draft
+    if not draft_id and not submission_id and not request.query_params.get('new') and not request.query_params.get('edit'):
+        with ui.column().classes('w-full max-w-6xl mx-auto p-6'):
+            # Header with title and new draft button
+            with ui.row().classes('w-full justify-between items-center mb-6'):
+                ui.label('📋 Drafts & Submissions').classes('text-2xl font-bold text-gray-800')
+                ui.button('New Draft', 
+                         on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?new=true'),
+                         icon='add',
+                         color='primary').classes('px-6 py-2')
+            
+            # Show existing submission if exists
+            if existing_submission:
+                with ui.card().classes('w-full mb-8 border-l-4 border-green-500'):
+                    with ui.row().classes('w-full items-center'):
+                        ui.icon('check_circle', color='green', size='28px')
+                        ui.label('Submitted').classes('text-xl font-semibold ml-2 text-green-700')
+                        ui.label(f'Submitted on: {existing_submission.get("submitted_at", "").strftime("%d %b %Y, %I:%M %p")}').classes('ml-auto text-gray-500')
+                    
+                    # Show preview of submitted data
+                    if existing_submission.get('data'):
+                        with ui.expansion('View Submission Data', icon='visibility').classes('w-full mt-4'):
+                            with ui.table().classes('w-full border rounded-lg'):
+                                # Header
+                                with ui.row().classes('bg-gray-100 p-3 font-medium'):
+                                    for header in headers:
+                                        ui.cell(header).classes('font-semibold')
+                                
+                                # Data (show first 3 rows as preview)
+                                for row in existing_submission.get('data', [])[:3]:
+                                    with ui.row().classes('border-t p-3 hover:bg-gray-50'):
+                                        for header in headers:
+                                            ui.cell(str(row.get(header, ''))).classes('truncate max-w-xs')
+                                
+                                if len(existing_submission.get('data', [])) > 3:
+                                    with ui.row().classes('border-t p-2 bg-gray-50'):
+                                        ui.cell(f'+ {len(existing_submission.get("data", [])) - 3} more rows...').classes('text-gray-500')
+                    
+                    with ui.row().classes('w-full mt-4 gap-3'):
+                        ui.button('View Full Submission', 
+                                on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?submission={existing_submission["_id"]}'),
+                                color='primary',
+                                icon='visibility')
+                        
+                        if existing_submission.get('status') == 'submitted':
+                            ui.button('Create New Version', 
+                                    on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?edit={existing_submission["_id"]}'),
+                                    color='blue',
+                                    icon='edit_note')
+            
+            # Show drafts list if any
+            if drafts:
+                with ui.card().classes('w-full mt-8'):
+                    with ui.row().classes('w-full items-center mb-4'):
+                        ui.icon('drafts', color='primary', size='28px')
+                        ui.label('Your Drafts').classes('text-xl font-semibold ml-2 text-gray-800')
+                    
+                    # Table for drafts
+                    with ui.table().classes('w-full rounded-lg overflow-hidden'):
+                        # Header
+                        with ui.row().classes('bg-gray-100 p-4 font-medium'):
+                            ui.cell('Created').classes('font-semibold')
+                            ui.cell('Last Updated').classes('font-semibold')
+                            ui.cell('Data Preview').classes('font-semibold')
+                            ui.cell('Actions').classes('font-semibold text-right')
+                        
+                        # Rows
+                        for draft in drafts:
+                            with ui.row().classes('border-t hover:bg-gray-50 transition-colors'):
+                                # Created and Updated times
+                                with ui.cell().classes('p-4'):
+                                    ui.label('Created:').classes('text-xs text-gray-500')
+                                    ui.label(draft.get('created_at', '').strftime('%d %b %Y, %I:%M %p'))
+                                
+                                with ui.cell().classes('p-4'):
+                                    ui.label('Last Updated:').classes('text-xs text-gray-500')
+                                    ui.label(draft.get('updated_at', '').strftime('%d %b %Y, %I:%M %p'))
+                                
+                                # Data preview
+                                with ui.cell().classes('p-4'):
+                                    if draft.get('data'):
+                                        preview = ', '.join([f"{k}: {v}" for k, v in draft['data'][0].items()][:2])
+                                        ui.label(preview).classes('truncate max-w-xs')
+                                        ui.label(f"{len(draft.get('data', []))} rows").classes('text-xs text-gray-500')
+                                    else:
+                                        ui.label('No data').classes('text-gray-400')
+                                
+                                # Actions
+                                with ui.cell().classes('p-4 text-right'):
+                                    with ui.row().classes('justify-end gap-2'):
+                                        ui.button(icon='edit', 
+                                                on_click=lambda d=draft: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?draft={d["_id"]}'),
+                                                color='blue',
+                                                flat=True,
+                                                dense=True,
+                                                tooltip='Edit Draft')
+                                        ui.button(icon='delete', 
+                                                on_click=lambda d=draft: criteria_submissions_col.delete_one({'_id': d['_id']}) or ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}'),
+                                                color='red',
+                                                flat=True,
+                                                dense=True,
+                                                tooltip='Delete Draft')
+    
+    def save_draft(is_submit=False):
+        """Save the current form data as a draft or submit it"""
+        try:
+            # Create submission data dictionary
+            submission_data = {
+                'data': data_rows,
+                'status': 'submitted' if is_submit else 'draft',
+                'updated_at': datetime.datetime.utcnow(),
+                'updated_by': current_user['email']
+            }
+            
+            if upload_method == 'file':
+                submission_data['file_name'] = file_name
+        
+            # Update existing or insert new
+            if current_data and '_id' in current_data:
+                criteria_submissions_col.update_one(
+                    {'_id': current_data['_id']},
+                    {'$set': submission_data}
+                )
+                submission_id = current_data['_id']
+            else:
+                submission_data['created_at'] = datetime.datetime.utcnow()
+                submission_data['created_by'] = current_user['email']
+                submission_id = criteria_submissions_col.insert_one(submission_data).inserted_id
+            
+            ui.notify('Data saved successfully!', color='positive')
+            
+            if is_submit:
+                ui.navigate.to(f'/program_admin/{program_id}/criteria')
+            else:
+                ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?draft={submission_id}')
+                
+        except Exception as e:
+            ui.notify(f'Error saving data: {str(e)}', color='negative')
+    
+    def handle_upload(e):
+        """Handle file upload and parse data"""
+        nonlocal data_rows, file_name, df
+        try:
+            file_content = e.content.read()
+            file_name = e.name
+            
+            # Parse file based on extension
+            if file_name.endswith('.xlsx') or file_name.endswith('.xls'):
+                df = pd.read_excel(io.BytesIO(file_content))
+            elif file_name.endswith('.csv'):
+                df = pd.read_csv(io.BytesIO(file_content))
+            else:
+                raise ValueError('Unsupported file format. Please upload Excel (.xlsx, .xls) or CSV (.csv) files.')
+            
+            # Convert all columns to string and normalize headers
+            df = df.astype(str)
+            df.columns = [str(col).strip().lower() for col in df.columns]
+            
+            # Convert to list of dicts for the table
+            data_rows = df.to_dict('records')
+            
+            # If no data rows, create one empty row
+            if not data_rows:
+                data_rows = [{}]
+                
+            ui.notify(f'Successfully loaded {len(data_rows)} rows from {file_name}', color='positive')
+            
+        except Exception as e:
+            ui.notify(f'Error processing file: {str(e)}', color='negative')
+    
+    def render_data_entry_form():
+        """Render the data entry form with headers, upload/manual options, and supporting docs"""
+        with ui.column().classes('w-full max-w-5xl mx-auto gap-6'):
+            # Section 1: Show Headers
+            with ui.card().classes('w-full p-6'):
+                ui.label('📋 Required Fields').classes('text-xl font-semibold mb-4')
+                with ui.grid(columns=2, rows=(len(headers) + 1) // 2).classes('w-full gap-4'):
+                    for header in headers:
+                        with ui.card().classes('p-3 bg-gray-50'):
+                            ui.label(header).classes('font-medium text-gray-700')
+            
+            # Section 2: Data Entry Method
+            with ui.card().classes('w-full p-6'):
+                ui.label('📤 Data Entry Method').classes('text-xl font-semibold mb-4')
+                with ui.row().classes('w-full gap-6'):
+                    # Manual Entry Option
+                    with ui.column().classes('flex-1 border-2 rounded-lg p-4 transition-all'):
+                        ui.radio(['Manual Entry', 'Upload File'], 
+                                value='Manual Entry', 
+                                on_change=lambda e: set_upload_method(e.value == 'Upload File'))
+                        
+                        # Manual Entry Form
+                        if not upload_method == 'file':
+                            with ui.column().classes('w-full mt-4 gap-4'):
+                                if not data_rows:
+                                    data_rows.append({})
+                                
+                                # Table for manual entry
+                                with ui.table().classes('w-full border rounded-lg'):
+                                    # Header
+                                    with ui.row().classes('bg-gray-100 p-2'):
+                                        for header in headers:
+                                            ui.label(header).classes('flex-1 font-medium')
+                                    
+                                    # Rows
+                                    for row_idx, row in enumerate(data_rows):
+                                        with ui.row().classes('p-2 border-t hover:bg-gray-50'):
+                                            for header in headers:
+                                                value = str(row.get(header, ''))
+                                                ui.input('', value=value, 
+                                                        on_change=lambda e, r=row_idx, h=header: update_data(r, h, e.value)) \
+                                                    .classes('flex-1 border rounded px-2 py-1')
+                                
+                                # Add Row Button
+                                ui.button('+ Add Row', on_click=lambda: data_rows.append({}))
+                    
+                    # File Upload Option
+                    with ui.column().classes('flex-1 border-2 rounded-lg p-4 transition-all', 
+                                          'border-blue-500 bg-blue-50' if upload_method == 'file' else ''):
+                        ui.radio(['Manual Entry', 'Upload File'], 
+                                value='Upload File', 
+                                on_change=lambda e: set_upload_method(e.value == 'Upload File'))
+                        
+                        if upload_method == 'file':
+                            with ui.column().classes('w-full mt-4 gap-4'):
+                                ui.upload(label='📤 Upload File', 
+                                         on_upload=handle_upload,
+                                         auto_upload=True).classes('w-full')
+                                ui.label('Supported formats: .xlsx, .xls, .csv').classes('text-sm text-gray-500')
+                                
+                                # Preview Table
+                                if data_rows:
+                                    with ui.card().classes('w-full mt-4'):
+                                        ui.label('📋 Preview').classes('font-medium mb-2')
+                                        with ui.table().classes('w-full'):
+                                            # Header
+                                            with ui.row().classes('bg-gray-100 p-2'):
+                                                for header in headers:
+                                                    ui.label(header).classes('flex-1 font-medium')
+                                            
+                                            # Rows (limit to 5 for preview)
+                                            for row in data_rows[:5]:
+                                                with ui.row().classes('p-2 border-t'):
+                                                    for header in headers:
+                                                        ui.label(str(row.get(header, ''))).classes('flex-1 truncate')
+                                            
+                                            if len(data_rows) > 5:
+                                                with ui.row().classes('p-2 border-t bg-gray-50'):
+                                                    ui.label(f'+ {len(data_rows) - 5} more rows...').classes('text-gray-500')
+            
+            # Section 3: Supporting Documents (if required)
+            if criteria.get('requires_documents', False):
+                with ui.card().classes('w-full p-6'):
+                    ui.label('📎 Supporting Documents').classes('text-xl font-semibold mb-4')
+                    ui.label('Please upload any supporting documents required for this submission.')
+                    
+                    # Document upload area
+                    with ui.column().classes('w-full border-2 border-dashed rounded-lg p-6 text-center'):
+                        ui.icon('upload', size='48px').classes('text-gray-400 mx-auto mb-2')
+                        ui.label('Drag & drop files here or click to browse').classes('text-gray-600 mb-2')
+                        ui.button('Select Files', icon='folder_open').classes('mx-auto')
+                    
+                    # Uploaded files list
+                    with ui.column().classes('w-full mt-4'):
+                        ui.label('Uploaded Documents:').classes('font-medium mb-2')
+                        # Example uploaded files (would be dynamic in real app)
+                        with ui.row().classes('items-center gap-2 p-2 bg-gray-50 rounded'):
+                            ui.icon('description', color='primary')
+                            ui.label('document1.pdf')
+                            ui.space()
+                            ui.button(icon='delete', color='red').props('flat dense')
+            
+            # Action Buttons
+            with ui.row().classes('w-full justify-end gap-4 mt-6'):
+                ui.button('Cancel', 
+                         on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                         color='gray')
+                
+                ui.button('Save as Draft', 
+                         on_click=lambda: save_draft(data_rows, False), 
+                         icon='save',
+                         color='blue')
+                
+                ui.button('Submit', 
+                         on_click=lambda: save_draft(data_rows, True), 
+                         icon='send',
+                         color='green')
+    
+    def update_data(row_idx, header, value):
+        """Update data when input fields change"""
+        nonlocal data_rows
+        if row_idx >= len(data_rows):
+            data_rows.extend([{} for _ in range(row_idx - len(data_rows) + 1)])
+        if header not in data_rows[row_idx]:
+            data_rows[row_idx][header] = ''
+        data_rows[row_idx][header] = value
+    
+    def set_upload_method(is_file_upload):
+        """Toggle between manual and file upload modes"""
+        nonlocal upload_method
+        upload_method = 'file' if is_file_upload else 'manual'
 
-    # Sidebar + main content layout
-    with ui.row().style('height: 100vh; width: 100vw; background: var(--background);'):
-        # ...existing code for sidebar...
-        with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content(institution, main_color)
+    # Main layout with fixed header and sidebar
+    with ui.column().classes('w-full h-screen bg-gray-50'):
+        # Sticky header with back button and title
+        with ui.row().classes('w-full bg-white shadow-sm p-4 items-center sticky top-0 z-20'):
+            ui.button(icon='arrow_back', 
+                     on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'),
+                     color='primary').props('flat dense').classes('mr-2')
+            
+            with ui.column().classes('flex-1'):
+                ui.label(f'Fill Criteria: {criteria.get("name", "")}').classes('text-2xl font-bold text-gray-800')
+                if current_data and current_data.get('status') == 'draft':
+                    ui.label('Draft').classes('text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full w-fit')
+            
+            with ui.row().classes('ml-auto gap-2'):
+                if current_data and current_data.get('status') == 'draft':
+                    ui.button('View All Drafts', 
+                            on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}'),
+                            icon='drafts',
+                            color='blue',
+                            outline=True)
+        
+        # Main content area with sidebar and form
+        with ui.row().classes('w-full flex-1 overflow-hidden'):
+            # Fixed Sidebar
+            with ui.column().classes('h-[calc(100vh-4rem)] bg-white shadow-md w-64 fixed'):
+                program_admin_sidebar(program_id, institution)
+            
+            # Scrollable content area
+            with ui.column().classes('ml-64 w-[calc(100%-16rem)] h-[calc(100vh-4rem)] overflow-y-auto p-6'):
+                # Show existing submission notice if exists
+                if existing_submission and not draft_id:
+                    with ui.card().classes('w-full bg-yellow-50 border-l-4 border-yellow-400 mb-6'):
+                        with ui.row().classes('items-center w-full'):
+                            ui.icon('warning', size='24px', color='yellow-700')
+                            ui.label('You have already submitted this criteria.').classes('ml-2 text-yellow-800')
+                            ui.button('View Submission', 
+                                    on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?submission={existing_submission["_id"]}'),
+                                    color='yellow-700', 
+                                    outline=True).classes('ml-auto')
+                
+                # Render the appropriate view based on state
+                if not current_data and not request.query_params.get('new'):
+                    # Show drafts list or initial state
+                    if drafts:
+                        with ui.dialog() as drafts_dialog, ui.card().classes('p-4 w-full max-w-3xl'):
+                            ui.label('📝 Your Drafts').classes('text-xl font-bold mb-4')
+                            
+                            # Create a table to show drafts
+                            columns = [
+                                {'name': 'created_at', 'label': 'Created', 'field': 'created_at', 'sortable': True},
+                                {'name': 'updated_at', 'label': 'Last Updated', 'field': 'updated_at', 'sortable': True},
+                                {'name': 'actions', 'label': 'Actions', 'field': 'actions'}
+                            ]
+                            
+                            rows = []
+                            for draft in drafts:
+                                rows.append({
+                                    'created_at': draft.get('created_at', 'N/A').strftime('%Y-%m-%d %H:%M'),
+                                    'updated_at': draft.get('updated_at', 'N/A').strftime('%Y-%m-%d %H:%M'),
+                                    'actions': str(draft['_id'])
+                                })
+                            
+                            table = ui.table(columns=columns, rows=rows, row_key='actions').classes('w-full')
+                            
+                            # Add action buttons
+                            with table.add_slot('body-cell-actions'):
+                                table.add_slot('body-cell-actions', '''
+                                    <q-td :props="props">
+                                        <q-btn flat round dense color="primary" icon="edit" @click="$parent.$emit('edit', props.row.actions)" />
+                                        <q-btn flat round dense color="negative" icon="delete" @click="$parent.$emit('delete', props.row.actions)" />
+                                    </q-td>
+                                ''')
+                            
+                            # Handle edit/delete actions
+                            def on_edit(draft_id):
+                                ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?draft={draft_id}')
+                                drafts_dialog.close()
+                            
+                            def on_delete(draft_id):
+                                criteria_submissions_col.delete_one({'_id': ObjectId(draft_id)})
+                                ui.notify('Draft deleted', color='positive')
+                                ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}')
+                            
+                            table.on('edit', on_edit)
+                            table.on('delete', on_delete)
+                            
+                            with ui.row().classes('w-full justify-between mt-4'):
+                                ui.button('Create New', on_click=drafts_dialog.close).classes('bg-blue-500 text-white')
+                                ui.button('Cancel', on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/criteria'))
+                        
+                        # Show drafts dialog
+                        ui.timer(0.1, lambda: drafts_dialog.open())
+                    else:
+                        # Show empty state with create new option
+                        with ui.column().classes('items-center justify-center h-64 w-full bg-white rounded-lg border-2 border-dashed border-gray-300'):
+                            ui.icon('description', size='48px').classes('text-gray-400 mb-4')
+                            ui.label('No drafts found').classes('text-xl text-gray-500 mb-2')
+                            ui.button('Create New Draft', 
+                                     on_click=lambda: ui.navigate.to(f'/program_admin/{program_id}/fill_criteria/{criteria_id}?new=true'),
+                                     icon='add').classes('mt-4 bg-blue-500 text-white')
+                else:
+                    # Show the data entry form
+                    render_data_entry_form()
         ui.label(f'Program: {program.get("name", "Unknown")}').style(
             'font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 2rem;'
         )
@@ -4927,8 +6884,10 @@ def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
                         ui.label(f'Row {row_index + 1}').style(
                             'font-weight: bold; color: var(--text-primary); margin-bottom: 0.5rem;'
                         )
-        if df.empty:
-            print("DEBUG: Excel file is empty (no data rows)")
+        if not df.empty:
+            print(f"DEBUG: Loaded {len(df)} rows from Excel file")
+        else:
+            print("DEBUG: No data found in the file")
         print(f"DEBUG: Excel parsing complete. Found {len(data_rows)} rows")
         # Show data table
         print(f"DEBUG: About to show data table with {len(data_rows)} rows")
@@ -5015,8 +6974,8 @@ def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
                         f'background: {main_color}; color: white; padding: 0.75rem 1.5rem; border-radius: 8px; border: none; font-weight: 600;'
                     )
             
-                print("DEBUG: Table creation complete, showing success notification")
-                ui.notify(f'File "{file_name}" parsed successfully! {len(data_rows)} rows loaded. Please review and edit the data.', color='positive')
+            print("DEBUG: Table creation complete, showing success notification")
+            ui.notify(f'File "{file_name}" parsed successfully! {len(data_rows)} rows loaded. Please review and edit the data.', color='positive')
             # ...existing code...
     
     def submit_data(data_rows=None, headers=None):
@@ -5049,9 +7008,9 @@ def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
                 'headers': headers,
                 'status': 'submitted',
                 'submitted_by': current_user['email'],
-                'submitted_at': datetime.datetime.now(datetime.timezone.utc),
-                'created_at': datetime.datetime.now(datetime.timezone.utc),
-                'updated_at': datetime.datetime.now(datetime.timezone.utc)
+                'submitted_at': datetime.now(timezone.utc),
+                'created_at': datetime.now(timezone.utc),
+                'updated_at': datetime.now(timezone.utc)
             }
             
             # Insert into criteria_submissions collection
@@ -5092,9 +7051,9 @@ def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
                         'headers': headers,
                         'status': 'draft',
                         'submitted_by': current_user['email'],
-                        'submitted_at': datetime.datetime.now(datetime.timezone.utc),
-                        'created_at': datetime.datetime.now(datetime.timezone.utc),
-                        'updated_at': datetime.datetime.now(datetime.timezone.utc)
+                        'submitted_at': datetime.now(timezone.utc),
+                        'created_at': datetime.now(timezone.utc),
+                        'updated_at': datetime.now(timezone.utc)
                     }
                     
                     # Insert into criteria_submissions collection
@@ -5132,6 +7091,28 @@ def program_admin_fill_criteria_page(program_id: str, criteria_id: str):
                         ui.label(header).style(
                             'background: white; color: var(--text-primary); padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #e9ecef; font-weight: 500; font-size: 0.9rem;'
                         )
+        
+        # Define the file upload handler first
+        def handle_file_upload(e, headers):
+            # Parse the uploaded file and show data table
+            try:
+                # This would parse the file and extract data
+                # For now, show a sample table
+                data_table_container.style('display: block;')
+                
+                with data_table_container:
+                    ui.label('📊 Data Preview').style(
+                        f'font-size: 1.5rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
+                    )
+                    
+                    # Sample data table with editable cells
+                    with ui.table(columns=headers, rows=[]).style('width: 100%;'):
+                        # Table rows would be added here
+                        pass
+                
+                ui.notify('File uploaded successfully!', color='positive')
+            except Exception as ex:
+                ui.notify(f'Error processing file: {str(ex)}', color='negative')
         
         # File upload section
         with ui.card().style('background: white; border: 2px dashed #e9ecef; padding: 2rem; margin-bottom: 2rem; border-radius: 10px; text-align: center;'):
@@ -5569,9 +7550,9 @@ def department_admin_fill_criteria_page(department_id: str, criteria_id: str):
                     'headers': headers,
                     'status': 'draft',
                     'submitted_by': current_user['email'],
-                    'submitted_at': datetime.datetime.now(datetime.timezone.utc),
-                    'created_at': datetime.datetime.now(datetime.timezone.utc),
-                    'updated_at': datetime.datetime.now(datetime.timezone.utc)
+                    'submitted_at': datetime.now(timezone.utc),
+                    'created_at': datetime.now(timezone.utc),
+                    'updated_at': datetime.now(timezone.utc)
                 }
                 # Insert into criteria_submissions collection
                 result = criteria_submissions_col.insert_one(draft_doc)
@@ -5605,9 +7586,9 @@ def department_admin_fill_criteria_page(department_id: str, criteria_id: str):
                         'headers': headers,
                         'status': 'draft',
                         'submitted_by': current_user['email'],
-                        'submitted_at': datetime.datetime.now(datetime.timezone.utc),
-                        'created_at': datetime.datetime.now(datetime.timezone.utc),
-                        'updated_at': datetime.datetime.now(datetime.timezone.utc)
+                        'submitted_at': datetime.now(timezone.utc),
+                        'created_at': datetime.now(timezone.utc),
+                        'updated_at': datetime.now(timezone.utc)
                     }
                     # Insert into criteria_submissions collection
                     result = criteria_submissions_col.insert_one(draft_doc)
@@ -5734,72 +7715,207 @@ def fill_criteria_page(criteria_id: str):
             f'font-size: 2rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
         )
         
-        # Show headers for reference
-        headers = criteria.get('headers', [])
-        if headers:
-            with ui.card().style('background: #f8f9fa; border: 1px solid #e9ecef; padding: 1.5rem; margin-bottom: 2rem; border-radius: 10px;'):
-                ui.label('📋 Spreadsheet Headers (Reference)').style(
-                    f'font-size: 1.2rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
-                )
-                with ui.row().style('flex-wrap: wrap; gap: 0.5rem;'):
-                    for i, header in enumerate(headers):
-                        ui.label(header).style(
-                            'background: white; color: var(--text-primary); padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #e9ecef; font-weight: 500; font-size: 0.9rem;'
-                        )
-        
-        # File upload section
-        with ui.card().style('background: white; border: 2px dashed #e9ecef; padding: 2rem; margin-bottom: 2rem; border-radius: 10px; text-align: center;'):
-            ui.label('📤 Upload Spreadsheet').style(
-                f'font-size: 1.3rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
+        # Working headers (from criteria) and grid data state
+        headers = [h for h in criteria.get('headers', []) if str(h).strip()]
+        required_headers = headers[:]  # treat all as required for now
+
+        # Container references
+        grid_container = ui.column().style('gap: 0.75rem;')
+        action_bar = ui.row().style('gap: 0.75rem; margin-top: 0.5rem;')
+
+        # Utility: build grid columns for AgGrid
+        def build_columns(hdrs):
+            return [{
+                'field': h,
+                'headerName': h,
+                'editable': True,
+                'sortable': True,
+                'filter': True,
+                'resizable': True,
+            } for h in hdrs]
+
+        # Utility: normalize rows to ensure all headers exist
+        def normalize_rows(rows, hdrs):
+            norm = []
+            for r in rows:
+                row = {}
+                for h in hdrs:
+                    row[h] = '' if r.get(h) is None else str(r.get(h))
+                norm.append(row)
+            return norm
+
+        # Load existing draft for this user and criteria (latest)
+        existing_rows = []
+        try:
+            from bson import ObjectId
+            query = {
+                'criteria_id': ObjectId(criteria_id),
+                'submitted_by': current_user.get('email'),
+                'status': 'draft',
+            }
+            draft_doc = criteria_submissions_col.find_one(query, sort=[('updated_at', DESCENDING)])
+            if draft_doc:
+                headers = draft_doc.get('headers', headers) or headers
+                existing_rows = draft_doc.get('data', [])
+        except Exception as e:
+            # Safe fallback; keep UI functional
+            existing_rows = []
+
+        # Grid: either from existing draft or empty
+        rows_state = normalize_rows(existing_rows, headers)
+
+        # File upload: allows replacing/adding data
+        with ui.card().style('background: white; border: 2px dashed #e9ecef; padding: 1rem; border-radius: 10px;'):
+            ui.label('📤 Upload Spreadsheet (.xlsx/.xls/.csv)').style(
+                f'font-weight: 600; color: {main_color}; margin-bottom: 0.25rem;'
             )
-            ui.label('Upload your Excel/CSV file with data matching the headers above').style(
-                'color: var(--text-secondary); margin-bottom: 1.5rem;'
+            ui.label('Headers must match the configured columns for this criteria.').style('color: var(--text-secondary); margin-bottom: 0.75rem;')
+
+            async def on_upload(e):
+                try:
+                    file = e.files[0]
+                    name = file.name.lower()
+                    content = await file.read()
+                    import pandas as pd, io
+                    if name.endswith('.xlsx') or name.endswith('.xls'):
+                        df = pd.read_excel(io.BytesIO(content))
+                    elif name.endswith('.csv'):
+                        df = pd.read_csv(io.BytesIO(content))
+                    else:
+                        raise ValueError('Unsupported file format. Use .xlsx, .xls or .csv')
+
+                    # Ensure columns match headers
+                    df_cols = [str(c).strip() for c in df.columns.tolist()]
+                    if set(df_cols) != set(headers):
+                        ui.notify('Uploaded columns do not match required headers. Please adjust your file.', color='warning')
+                    # Reorder and coerce to string
+                    safe_df = df.reindex(columns=headers)
+                    new_rows = safe_df.fillna('').astype(str).to_dict(orient='records')
+
+                    # Replace rows_state
+                    grid_container.clear()
+                    build_grid(new_rows)
+                    ui.notify(f'Loaded {len(new_rows)} rows from file', color='positive')
+                except Exception as ex:
+                    ui.notify(f'Upload error: {ex}', color='negative')
+
+            ui.upload(label='Choose File', on_upload=on_upload).style(
+                f'background: {main_color}; color: white; padding: 0.6rem 1rem; border-radius: 8px; border: none;'
             )
-            
-            # File upload component
-            file_upload = ui.upload(
-                label='Choose File',
-                on_upload=lambda e: handle_file_upload(e, headers)
-            ).style(f'background: {main_color}; color: white; padding: 1rem; border-radius: 8px; border: none;')
-        
-        # Data table section (initially hidden)
-        data_table_container = ui.column().style('display: none;')
-        
-        def handle_file_upload(e, headers):
-            # Parse the uploaded file and show data table
+
+        # Build the editable grid using AgGrid if available; fallback to simple table
+        def build_grid(initial_rows):
+            nonlocal rows_state
+            rows_state = normalize_rows(initial_rows or [], headers)
+
             try:
-                # This would parse the file and extract data
-                # For now, show a sample table
-                data_table_container.style('display: block;')
-                
-                with data_table_container:
-                    ui.label('📊 Data Table').style(
-                        f'font-size: 1.5rem; font-weight: bold; color: {main_color}; margin-bottom: 1rem;'
+                grid = ui.aggrid({
+                    'defaultColDef': {
+                        'editable': True,
+                        'sortable': True,
+                        'filter': True,
+                        'resizable': True,
+                    },
+                    'columnDefs': build_columns(headers),
+                    'rowData': rows_state,
+                    'animateRows': True,
+                    'rowSelection': 'multiple',
+                }).style('height: 400px; width: 100%;')
+            except Exception:
+                # Fallback to simple table with inline editors (less capable)
+                with ui.table(columns=headers, rows=rows_state).style('width: 100%;'):
+                    pass
+
+            # Row actions
+            with action_bar:
+                def add_row():
+                    rows_state.append({h: '' for h in headers})
+                    grid_container.clear(); build_grid(rows_state)
+                def clear_all():
+                    rows_state.clear(); grid_container.clear(); build_grid(rows_state)
+                ui.button('➕ Add Row', on_click=add_row).props('flat color=primary')
+                ui.button('🧹 Clear All', on_click=clear_all).props('flat color=warning')
+
+            # Save/Submit actions
+            def collect_rows() -> list:
+                # Try to read from aggrid model if present, else use rows_state
+                try:
+                    # NiceGUI's aggrid stores data in .options['rowData']
+                    return grid.options.get('rowData', rows_state)  # type: ignore
+                except Exception:
+                    return rows_state
+
+            def validate_required(rows: list) -> Optional[str]:
+                for i, r in enumerate(rows, start=1):
+                    for h in required_headers:
+                        if not str(r.get(h, '')).strip():
+                            return f'Missing value for "{h}" in row {i}'
+                return None
+
+            def do_upsert(status: str):
+                from bson import ObjectId
+                doc = {
+                    'criteria_id': ObjectId(criteria_id),
+                    'institution_id': ObjectId(criteria.get('institution_id')) if criteria.get('institution_id') else None,
+                    'academic_year_id': criteria.get('academic_year_id'),
+                    'headers': headers,
+                    'data': collect_rows(),
+                    'status': status,
+                    'submitted_by': current_user.get('email'),
+                    'updated_at': datetime.now(timezone.utc),
+                }
+                # include program/department if available from session
+                if current_user.get('program_id'):
+                    doc['program_id'] = ObjectId(current_user['program_id'])
+                if current_user.get('department_id'):
+                    doc['department_id'] = ObjectId(current_user['department_id'])
+
+                # Upsert by user+criteria+status=draft for drafts; insert new on submit
+                if status == 'draft':
+                    criteria_submissions_col.update_one(
+                        {
+                            'criteria_id': doc['criteria_id'],
+                            'submitted_by': doc['submitted_by'],
+                            'status': 'draft',
+                        },
+                        {
+                            '$set': doc,
+                            '$setOnInsert': {'created_at': datetime.now(timezone.utc)},
+                        },
+                        upsert=True,
                     )
-                    
-                    # Sample data table
-                    with ui.table(columns=headers, rows=[]).style('width: 100%;'):
-                        pass
-                    
-                    # Action buttons
-                    with ui.row().style('gap: 1rem; margin-top: 1.5rem;'):
-                        ui.button('💾 Save as Draft', on_click=lambda: save_as_draft()).style(
-                            f'background: #6c757d; color: white; padding: 0.75rem 1.5rem; border-radius: 8px; border: none; font-weight: 600;'
-                        )
-                        ui.button('✅ Submit', on_click=lambda: submit_data()).style(
-                            f'background: {main_color}; color: white; padding: 0.75rem 1.5rem; border-radius: 8px; border: none; font-weight: 600;'
-                        )
-                
-                ui.notify('File uploaded successfully! Please review and edit the data.', color='positive')
-                
-            except Exception as e:
-                ui.notify(f'Error processing file: {str(e)}', color='negative')
-        
-        def save_as_draft():
-            ui.notify('Data saved as draft successfully!', color='positive')
-        
-        def submit_data():
-            ui.notify('Data submitted successfully!', color='positive')
+                    return None
+                else:
+                    doc['submitted_at'] = datetime.now(timezone.utc)
+                    return criteria_submissions_col.insert_one(doc)
+
+            def on_save_draft():
+                try:
+                    rows = collect_rows()
+                    # No validation for drafts; save raw
+                    do_upsert('draft')
+                    ui.notify(f'Saved draft with {len(rows)} rows', color='positive')
+                except Exception as ex:
+                    ui.notify(f'Error saving draft: {ex}', color='negative')
+
+            def on_submit():
+                try:
+                    rows = collect_rows()
+                    err = validate_required(rows)
+                    if err:
+                        ui.notify(err, color='warning'); return
+                    res = do_upsert('submitted')
+                    ui.notify('Submission created' + (f' (ID: {str(res.inserted_id)})' if res else ''), color='positive')
+                except Exception as ex:
+                    ui.notify(f'Error submitting: {ex}', color='negative')
+
+            with ui.row().style('gap: 0.75rem; margin-top: 0.75rem; justify-content: flex-end;'):
+                ui.button('💾 Save Draft', on_click=on_save_draft).style('background: #6c757d; color: white;')
+                ui.button('✅ Submit', on_click=on_submit).style(f'background: {main_color}; color: white;')
+
+        # Build initial grid (existing draft if any)
+        with grid_container:
+            build_grid(rows_state)
     
     # Simple layout for this page
     with ui.column().style('padding: 2rem; max-width: 1200px; margin: 0 auto;'):
@@ -6011,7 +8127,8 @@ def department_admin_dashboard(department_id: str):
         
         # Main content
         with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content(institution, main_color)
+            # Main content will be rendered here by other UI components
+            pass
 
 # School Admin Dashboard
 @ui.page('/school_admin/{school_id}')
@@ -6093,7 +8210,8 @@ def school_admin_dashboard(school_id: str):
         
         # Main content
         with ui.column().style('flex: 1; padding: 2rem; overflow-y: auto;'):
-            content(institution, main_color)
+            # Main content will be rendered here by other UI components
+            pass
 
 @ui.page('/change_password')
 def change_password_page():
@@ -6197,17 +8315,39 @@ def change_password_page():
                     
                     ui.notify('Password changed successfully!', color='positive')
                     
+                    # Store user in session and local storage
+                    user_data = {
+                        'email': user['email'],
+                        'role': user.get('role', ''),
+                        'institution_id': str(user.get('institution_id', '')),
+                        'program_id': str(user.get('program_id', '')),
+                        'department_id': str(user.get('department_id', '')),
+                        'school_id': str(user.get('school_id', '')),
+                        'name': user.get('name', '')
+                    }
+                    app.storage.user = {'user': user_data}
+                    
+                    # Force update the current_user global
+                    global current_user
+                    current_user = user_data
+                    
+                    # Log the login
+                    log_audit_action(
+                        'LOGIN',
+                        f'User {user_data["email"]} logged in',
+                        user_email=user_data['email'],
+                        institution_id=user_data.get('institution_id')
+                    )
+                    
                     # Redirect based on user role
-                    if user.get('role') == 'Platform Owner':
-                        ui.navigate.to('/platform_owner')
-                    elif user.get('role') == 'Institution Admin':
-                        ui.navigate.to(f'/institution_admin/{institution_id}')
-                    elif user.get('role') == 'Program Admin':
-                        ui.navigate.to(f'/program_admin/{user.get("program_id")}')
-                    elif user.get('role') == 'Department Admin':
-                        ui.navigate.to(f'/department_admin/{user.get("department_id")}')
-                    elif user.get('role') == 'School Admin':
-                        ui.navigate.to(f'/school_admin/{user.get("school_id")}')
+                    if user_data.get('role') == 'Institution Admin' and user_data.get('institution_id'):
+                        ui.navigate.to(f"/institution_admin/{user_data['institution_id']}")
+                    elif user_data.get('role') == 'Program Admin' and user_data.get('program_id'):
+                        ui.navigate.to(f"/program_admin/{user_data['program_id']}")
+                    elif user_data.get('role') == 'Department Admin' and user_data.get('department_id'):
+                        ui.navigate.to(f"/department_admin/{user_data['department_id']}")
+                    elif user_data.get('role') == 'School Admin' and user_data.get('school_id'):
+                        ui.navigate.to(f"/school_admin/{user_data['school_id']}")
                     else:
                         ui.navigate.to('/dashboard')
                         
@@ -6225,6 +8365,23 @@ def change_password_page():
     # Simple layout
     with ui.column().style('padding: 2rem; max-width: 800px; margin: 0 auto;'):
         content()
+
+@ui.page('/logout')
+def logout():
+    """Handle user logout"""
+    global current_user
+    if app.storage.user.get('user'):
+        log_audit_action(
+            'LOGOUT',
+            f'User {app.storage.user["user"].get("email")} logged out',
+            user_email=app.storage.user['user'].get('email'),
+            institution_id=app.storage.user['user'].get('institution_id')
+        )
+    # Clear user data properly
+    app.storage.clear()
+    current_user = None
+    ui.navigate.to('/')
+    return "Logging out..."
 
 # Main application entry point
 if __name__ == '__main__':
